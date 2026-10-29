@@ -32,6 +32,7 @@ pub use crate::input::*;
 
 pub use wezterm_cell::*;
 pub use wezterm_surface::line::*;
+pub use wezterm_surface::{CursorShape, CursorVisibility};
 
 pub mod screen;
 pub use crate::screen::*;

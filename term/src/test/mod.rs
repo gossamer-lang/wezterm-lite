@@ -1379,3 +1379,99 @@ fn test_hyperlinks() {
         Compare::TEXT | Compare::ATTRS,
     );
 }
+
+/// Collects what the terminal writes back to the program.
+#[derive(Clone, Default)]
+struct Replies(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Replies {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_reply_is_written_before_the_output_that_asked_for_it_returns() {
+    let replies = Replies::default();
+    let mut term = Terminal::new(
+        TerminalSize {
+            rows: 4,
+            cols: 20,
+            pixel_width: 160,
+            pixel_height: 64,
+            dpi: 0,
+        },
+        Arc::new(TestTermConfig { scrollback: 0 }),
+        "WezTerm",
+        "O_o",
+        Box::new(replies.clone()),
+    );
+    term.advance_bytes("\x1b[2;3H\x1b[6n");
+    assert_eq!(replies.0.lock().unwrap().as_slice(), b"\x1b[2;3R");
+}
+
+#[test]
+fn a_run_of_combining_marks_is_cut_to_the_cell_limit() {
+    let mut term = TestTerm::new(2, 10, 0);
+    term.print(format!("e{}", "\u{301}".repeat(1000)));
+    let lines = term.screen().visible_lines();
+    let cell = lines[0].get_cell(0).unwrap();
+    assert_eq!(cell.str().chars().count(), 32);
+    assert!(cell.str().starts_with("e\u{301}"));
+}
+
+#[test]
+fn a_tab_over_blank_cells_leaves_a_tab_where_it_started() {
+    let mut term = TestTerm::new(2, 20, 0);
+    term.print("ab\tcd\r\nxy");
+    term.print("\x1b[1;3H\tz");
+    let lines = term.screen().visible_lines();
+    assert_eq!(lines[0].get_cell(2).unwrap().str(), "\t");
+    assert_eq!(lines[0].get_cell(8).unwrap().str(), "z");
+    // A tab over written text moves the cursor and leaves the text alone.
+    term.print("\x1b[2;1H\t");
+    assert_eq!(term.screen().visible_lines()[1].as_str(), "xy");
+}
+
+#[test]
+fn physical_lines_read_in_order_once_the_history_ring_wraps() {
+    let mut term = TestTerm::new(4, 20, 10);
+    for n in 0..100 {
+        term.print(format!("row-{n}\r\n"));
+    }
+    let screen = term.screen();
+    let all: Vec<String> = screen
+        .all_lines()
+        .iter()
+        .map(|l| l.as_str().into_owned())
+        .collect();
+    let mut seen = vec![];
+    screen.with_phys_lines(0..screen.scrollback_rows(), |lines| {
+        seen = lines.iter().map(|l| l.as_str().into_owned()).collect();
+    });
+    assert_eq!(seen, all);
+    assert_eq!(seen[0], "row-87");
+}
+
+#[test]
+fn a_combining_mark_in_a_later_read_joins_the_character_before_it() {
+    let mut term = TestTerm::new(2, 10, 0);
+    term.print("e");
+    term.print("\u{301}x");
+    let lines = term.screen().visible_lines();
+    assert_eq!(lines[0].get_cell(0).unwrap().str(), "e\u{301}");
+    assert_eq!(lines[0].get_cell(1).unwrap().str(), "x");
+    // At the right margin the cursor waits on the last cell, which the mark joins.
+    term.print("\r\n123456789");
+    term.print("0");
+    term.print("\u{301}");
+    assert_eq!(
+        term.screen().visible_lines()[1].get_cell(9).unwrap().str(),
+        "0\u{301}"
+    );
+}

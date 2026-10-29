@@ -23,8 +23,9 @@ impl<'a> CellRef<'a> {
         }
     }
 
-    pub fn str(&self) -> &str {
-        match self {
+    /// The cell's text, borrowed from the line it came from.
+    pub fn str(&self) -> &'a str {
+        match *self {
             Self::CellRef { cell, .. } => cell.str(),
             Self::ClusterRef { text, .. } => text,
         }
@@ -37,8 +38,9 @@ impl<'a> CellRef<'a> {
         }
     }
 
-    pub fn attrs(&self) -> &CellAttributes {
-        match self {
+    /// The cell's attributes, borrowed from the line it came from.
+    pub fn attrs(&self) -> &'a CellAttributes {
+        match *self {
             Self::CellRef { cell, .. } => cell.attrs(),
             Self::ClusterRef { attrs, .. } => attrs,
         }

@@ -596,12 +596,17 @@ impl TeenyString {
     ) -> Self {
         // De-fang the input text such that it has no special meaning
         // to a terminal.  All control and movement characters are rewritten
-        // as a space.
+        // as a space, except a tab: the terminal leaves one in the cell a tab
+        // began on so that copying the line gives the tab back.
         let s = if s.is_empty() || s == "\r\n" {
             " "
         } else if s.len() == 1 {
             let b = s.as_bytes()[0];
-            if b < 0x20 || b == 0x7f { " " } else { s }
+            if (b < 0x20 && b != b'\t') || b == 0x7f {
+                " "
+            } else {
+                s
+            }
         } else {
             s
         };
@@ -1028,15 +1033,18 @@ mod test {
 
     #[test]
     fn nerf_special() {
-        for c in " \n\r\t".chars() {
+        for c in " \n\r".chars() {
             let cell = Cell::new(c, CellAttributes::default());
             assert_eq!(cell.str(), " ");
         }
 
-        for g in &["", " ", "\n", "\r", "\t", "\r\n"] {
+        for g in &["", " ", "\n", "\r", "\r\n"] {
             let cell = Cell::new_grapheme(g, CellAttributes::default(), None);
             assert_eq!(cell.str(), " ");
         }
+
+        // A tab stays, for copying a line back.
+        assert_eq!(Cell::new('\t', CellAttributes::default()).str(), "\t");
     }
 
     #[test]

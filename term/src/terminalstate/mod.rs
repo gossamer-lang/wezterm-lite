@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 #[cfg(feature = "images")]
 use std::num::NonZeroUsize;
-use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 use wezterm_bidi::ParagraphDirectionHint;
 #[cfg(feature = "images")]
@@ -354,7 +353,7 @@ pub struct TerminalState {
     term_program: String,
     term_version: String,
 
-    writer: BufWriter<ThreadedWriter>,
+    writer: BufWriter<Box<dyn std::io::Write + Send>>,
 
     #[cfg(feature = "images")]
     image_cache: lru::LruCache<[u8; 32], Arc<ImageData>>,
@@ -430,72 +429,6 @@ fn default_color_map() -> HashMap<u16, RgbColor> {
     color_map
 }
 
-/// This struct implements a writer that sends the data across
-/// to another thread so that the write side of the terminal
-/// processing never blocks.
-///
-/// This is important for example when processing large pastes into
-/// vim.  In that scenario, we can fill up the data pending
-/// on vim's input buffer, while it is busy trying to send
-/// output to the terminal.  A deadlock is reached because
-/// send_paste blocks on the writer, but it is unable to make
-/// progress until we're able to read the output from vim.
-///
-/// We either need input or output to be non-blocking.
-/// Output seems safest because we want to be able to exert
-/// back-pressure when there is a lot of data to read,
-/// and we're in control of the write side, which represents
-/// input from the interactive user, or pastes.
-struct ThreadedWriter {
-    sender: Sender<WriterMessage>,
-}
-
-enum WriterMessage {
-    Data(Vec<u8>),
-    Flush,
-}
-
-impl ThreadedWriter {
-    fn new(mut writer: Box<dyn std::io::Write + Send>) -> Self {
-        let (sender, receiver) = channel::<WriterMessage>();
-
-        std::thread::spawn(move || {
-            while let Ok(msg) = receiver.recv() {
-                match msg {
-                    WriterMessage::Data(buf) => {
-                        if writer.write_all(&buf).is_err() {
-                            break;
-                        }
-                    }
-                    WriterMessage::Flush => {
-                        if writer.flush().is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        Self { sender }
-    }
-}
-
-impl std::io::Write for ThreadedWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.sender
-            .send(WriterMessage::Data(buf.to_vec()))
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::BrokenPipe, err))?;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.sender
-            .send(WriterMessage::Flush)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::BrokenPipe, err))?;
-        Ok(())
-    }
-}
-
 impl TerminalState {
     /// Constructs the terminal state.
     /// You generally want the `Terminal` struct rather than this one;
@@ -507,7 +440,7 @@ impl TerminalState {
         term_version: &str,
         writer: Box<dyn std::io::Write + Send>,
     ) -> TerminalState {
-        let writer = BufWriter::new(ThreadedWriter::new(writer));
+        let writer = BufWriter::new(writer);
         let seqno = 1;
         let screen = ScreenOrAlt::new(size, &config, seqno, config.bidi_mode());
 
@@ -1272,7 +1205,27 @@ impl TerminalState {
             Some(x) => x,
             None => self.left_and_right_margins.end - 1,
         };
-        self.cursor.x = x.min(self.left_and_right_margins.end - 1);
+        let x = x.min(self.left_and_right_margins.end - 1);
+        // A tab over a blank cell leaves '\t' in it, as xterm and VTE do, so
+        // copying the line gives the tab back; the cell still shows blank.
+        let (from, y) = (self.cursor.x, self.cursor.y);
+        if x > from {
+            let screen = self.screen_mut();
+            let attrs = match screen.get_cell(from, y) {
+                Some(cell) if cell.str() == " " => Some(cell.attrs().clone()),
+                Some(_) => None,
+                None => Some(CellAttributes::default()),
+            };
+            if let Some(attrs) = attrs {
+                screen.set_cell(
+                    from,
+                    y,
+                    &Cell::new_grapheme_with_width("\t", 1, attrs),
+                    seqno,
+                );
+            }
+        }
+        self.cursor.x = x;
         self.cursor.seqno = seqno;
     }
 

@@ -142,6 +142,8 @@ impl Terminal {
     /// is used to send input to the connected program; both keyboard
     /// and mouse input is encoded and written to that stream, as
     /// are answerback responses to a number of escape sequences.
+    /// The terminal writes to it on the thread that feeds it output,
+    /// so a writer that may block (a pty) belongs behind a queue.
     pub fn new(
         size: TerminalSize,
         config: Arc<dyn TerminalConfiguration + Send + Sync>,

@@ -54,6 +54,17 @@ impl<'a> Drop for Performer<'a> {
     }
 }
 
+/// The most codepoints one cell keeps: a longer cluster (a run of combining
+/// marks) is cut here, so a cell's text stays bounded whatever a program sends.
+const MAX_GRAPHEME_CHARS: usize = 32;
+
+fn bounded_grapheme(g: &str) -> &str {
+    match g.char_indices().nth(MAX_GRAPHEME_CHARS) {
+        Some((end, _)) => &g[..end],
+        None => g,
+    }
+}
+
 impl<'a> Performer<'a> {
     pub fn new(state: &'a mut TerminalState) -> Self {
         Self {
@@ -113,6 +124,39 @@ impl<'a> Performer<'a> {
         }
     }
 
+    /// Appends `marks` to the cell just printed, the one before the cursor,
+    /// keeping the cell's width and attributes. False when there is none.
+    fn extend_previous_cell(&mut self, marks: &str, seqno: wezterm_surface::SequenceNo) -> bool {
+        let col = if self.wrap_next {
+            self.cursor.x
+        } else if self.cursor.x > 0 {
+            self.cursor.x - 1
+        } else {
+            return false;
+        };
+        let y = self.cursor.y;
+        let screen = self.screen_mut();
+        let phys = screen.phys_row(y);
+        let line = screen.line_mut(phys);
+        let Some((at, text, width, attrs)) = line
+            .visible_cells()
+            .find(|c| c.cell_index() <= col && col < c.cell_index() + c.width().max(1))
+            .map(|c| {
+                (
+                    c.cell_index(),
+                    c.str().to_string(),
+                    c.width(),
+                    c.attrs().clone(),
+                )
+            })
+        else {
+            return false;
+        };
+        let joined = format!("{text}{marks}");
+        line.set_cell_grapheme(at, bounded_grapheme(&joined), width, attrs, seqno);
+        true
+    }
+
     fn flush_print(&mut self) {
         if self.print.is_empty() {
             return;
@@ -130,10 +174,19 @@ impl<'a> Performer<'a> {
             p.as_str()
         };
 
-        for g in Graphemes::new(text) {
-            let g = self.remap_grapheme(g);
+        for (n, g) in Graphemes::new(text).enumerate() {
+            let g = self.remap_grapheme(bounded_grapheme(g));
 
             let mut print_width = grapheme_column_width(g, Some(&self.unicode_version));
+            // Output arrives in pieces, so a combining mark can come after its
+            // base character was already printed; it joins that character.
+            if print_width == 0
+                && n == 0
+                && !is_white_space_grapheme(g)
+                && self.extend_previous_cell(g, seqno)
+            {
+                continue;
+            }
             if print_width == 0 {
                 // We got a zero-width grapheme.
 
