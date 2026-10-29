@@ -140,6 +140,8 @@ impl ImageCell {
         self.placement_id.hash(hasher);
     }
 
+    // One argument per kitty placement parameter, in protocol order.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_z_index(
         top_left: TextureCoordinate,
         bottom_right: TextureCoordinate,
@@ -196,8 +198,8 @@ impl ImageCell {
 
     /// negative z_index is rendered beneath the text layer.
     /// >= 0 is rendered above the text.
-    /// negative z_index < INT32_MIN/2 will be drawn under cells
-    /// with non-default background colors
+    /// > negative z_index < INT32_MIN/2 will be drawn under cells
+    /// > with non-default background colors
     pub fn z_index(&self) -> i32 {
         self.z_index
     }
@@ -362,13 +364,10 @@ impl ImageDataType {
     /// if the speed_factor is negative, non-finite or the result
     /// overflows the allow Duration range.
     pub fn adjust_speed(&mut self, speed_factor: f32) {
-        match self {
-            Self::AnimRgba8 { durations, .. } => {
-                for d in durations {
-                    *d = d.mul_f32(1. / speed_factor);
-                }
+        if let Self::AnimRgba8 { durations, .. } = self {
+            for d in durations {
+                *d = d.mul_f32(1. / speed_factor);
             }
-            _ => {}
         }
     }
 
@@ -423,12 +422,12 @@ impl ImageDataType {
                 match format {
                     ImageFormat::Gif => image::codecs::gif::GifDecoder::new(cursor)
                         .and_then(|decoder| decoder.into_frames().collect_frames())
-                        .and_then(|frames| {
+                        .map(|frames| {
                             if frames.is_empty() {
                                 log::error!("decoded image has 0 frames, using placeholder");
-                                Ok(Self::placeholder())
+                                Self::placeholder()
                             } else {
-                                Ok(Self::decode_frames(frames))
+                                Self::decode_frames(frames)
                             }
                         })
                         .unwrap_or_else(|err| {
@@ -601,6 +600,11 @@ impl ImageData {
             data: Mutex::new(data),
             hash,
         }
+    }
+
+    /// True when the image holds no bytes in memory.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Returns the in-memory footprint

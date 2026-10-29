@@ -222,7 +222,7 @@ impl TerminalState {
                     .get_cell(cursor_x + x, cursor_y)
                     .cloned()
                     .unwrap_or_else(Cell::blank);
-                let img = Box::new(ImageCell::with_z_index(
+                let img = ImageCell::with_z_index(
                     TextureCoordinate::new(xpos, ypos),
                     TextureCoordinate::new(xpos + x_delta, ypos + y_delta),
                     params.data.clone(),
@@ -233,7 +233,7 @@ impl TerminalState {
                     padding_bottom,
                     params.image_id,
                     params.placement_id,
-                ));
+                );
                 match params.style {
                     ImageAttachStyle::Kitty => cell.attrs_mut().attach_image(img),
                     ImageAttachStyle::Sixel | ImageAttachStyle::Iterm => {
@@ -286,7 +286,7 @@ impl TerminalState {
     pub(crate) fn raw_image_to_image_data(
         &mut self,
         data: ImageDataType,
-    ) -> Result<Arc<ImageData>, termwiz::error::InternalError> {
+    ) -> anyhow::Result<Arc<ImageData>> {
         let key = data.compute_hash();
         if let Some(item) = self.image_cache.get(&key) {
             Ok(Arc::clone(item))

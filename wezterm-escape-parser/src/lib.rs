@@ -6,7 +6,11 @@
 // suppress inscrutable useless_attribute clippy that shows up when
 // using derive(FromPrimitive)
 #![allow(clippy::useless_attribute)]
+// Type and variant names follow the escape-sequence mnemonics (CSI, SGR, OSC).
 #![allow(clippy::upper_case_acronyms)]
+// A parameter parser answers Err(()) for "not this sequence"; callers only
+// branch on it and fall back to the raw sequence, so there is no error to carry.
+#![allow(clippy::result_unit_err)]
 #![cfg_attr(not(feature = "std"), no_std)]
 
 #[cfg(feature = "tmux_cc")]
@@ -155,7 +159,7 @@ impl core::fmt::Debug for ShortDeviceControl {
         write!(
             fmt,
             "ShortDeviceControl(params: {:?}, intermediates: [",
-            &self.params
+            self.params
         )?;
         for b in &self.intermediates {
             write!(fmt, "{:?} 0x{:x}, ", *b as char, *b)?;
@@ -210,7 +214,7 @@ impl core::fmt::Debug for EnterDeviceControlMode {
         write!(
             fmt,
             "EnterDeviceControlMode(params: {:?}, intermediates: [",
-            &self.params
+            self.params
         )?;
         for b in &self.intermediates {
             write!(fmt, "{:?} 0x{:x}, ", *b as char, *b)?;
@@ -573,7 +577,7 @@ impl OneBased {
             CsiParam::Integer(v) if *v == 0 => Ok(Self {
                 value: num_traits::one(),
             }),
-            CsiParam::Integer(v) if *v > 0 && *v <= i64::from(u32::max_value()) => {
+            CsiParam::Integer(v) if *v > 0 && *v <= i64::from(u32::MAX) => {
                 Ok(Self { value: *v as u32 })
             }
             _ => Err(()),
@@ -584,10 +588,8 @@ impl OneBased {
     /// 0 is equivalent to max_value.
     pub fn from_esc_param_with_big_default(v: &CsiParam) -> core::result::Result<Self, ()> {
         match v {
-            CsiParam::Integer(v) if *v == 0 => Ok(Self {
-                value: u32::max_value(),
-            }),
-            CsiParam::Integer(v) if *v > 0 && *v <= i64::from(u32::max_value()) => {
+            CsiParam::Integer(v) if *v == 0 => Ok(Self { value: u32::MAX }),
+            CsiParam::Integer(v) if *v > 0 && *v <= i64::from(u32::MAX) => {
                 Ok(Self { value: *v as u32 })
             }
             _ => Err(()),

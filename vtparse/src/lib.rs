@@ -19,6 +19,9 @@ mod enums;
 use crate::enums::*;
 mod transitions;
 
+#[cfg(all(not(feature = "std"), not(feature = "alloc"), not(feature = "no_std")))]
+compile_error!("vtparse needs one of the features std, alloc or no_std");
+
 #[cfg(any(feature = "std", feature = "alloc"))]
 extern crate alloc;
 
@@ -338,19 +341,17 @@ impl OscState {
             }
         } else if !self.full {
             let mut buf = [0u8; 8];
-            let extend_result = self
-                .buffer
-                .extend_from_slice(param.encode_utf8(&mut buf).as_bytes());
+            let bytes = param.encode_utf8(&mut buf).as_bytes();
 
+            #[cfg(any(feature = "std", feature = "alloc"))]
+            self.buffer.extend_from_slice(bytes);
+
+            // Without an allocator the buffer has a fixed capacity.
             #[cfg(all(not(feature = "std"), not(feature = "alloc")))]
-            {
-                if extend_result.is_err() {
-                    self.full = true;
-                    return;
-                }
+            if self.buffer.extend_from_slice(bytes).is_err() {
+                self.full = true;
+                return;
             }
-
-            let _ = extend_result;
 
             if self.num_params == 0 {
                 self.num_params = 1;
@@ -968,7 +969,7 @@ mod test {
         assert_eq!(
             parse_as_vec(input.as_bytes()),
             vec![VTAction::CsiDispatch {
-                params: params,
+                params,
                 parameters_truncated: false,
                 byte: b'p'
             }]

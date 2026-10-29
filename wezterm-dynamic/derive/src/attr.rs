@@ -98,7 +98,7 @@ impl<'a> FieldInfo<'a> {
         }
     }
 
-    pub fn from_dynamic(&self, struct_name: &str) -> TokenStream {
+    pub fn conversion_tokens(&self, struct_name: &str) -> TokenStream {
         let name = &self.name;
         let ident = &self.field.ident;
         let ty = &self.field.ty;

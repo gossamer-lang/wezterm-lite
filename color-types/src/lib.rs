@@ -19,6 +19,8 @@ extern crate alloc;
 
 use alloc::format;
 use alloc::string::String;
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
 #[cfg(feature = "std")]
@@ -185,7 +187,7 @@ fn linear_f32_to_srgb8_using_table(f: f32) -> u8 {
 fn linear_f32_to_srgb8(f: f32) -> u8 {
     #[cfg(feature = "std")]
     {
-        return linear_f32_to_srgb8_using_table(f);
+        linear_f32_to_srgb8_using_table(f)
     }
     #[cfg(not(feature = "std"))]
     {
@@ -197,7 +199,7 @@ fn linear_f32_to_srgb8(f: f32) -> u8 {
 fn srgb8_to_linear_f32(val: u8) -> f32 {
     #[cfg(feature = "std")]
     {
-        return unsafe { *SRGB_TO_F32_TABLE.get_unchecked(val as usize) };
+        unsafe { *SRGB_TO_F32_TABLE.get_unchecked(val as usize) }
     }
     #[cfg(not(feature = "std"))]
     {
@@ -272,6 +274,17 @@ impl SrgbaPixel {
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 #[cfg_attr(feature = "use_serde", derive(Serialize, Deserialize))]
 pub struct SrgbaTuple(pub f32, pub f32, pub f32, pub f32);
+
+impl core::fmt::Display for SrgbaTuple {
+    /// `#RRGGBB` when opaque, otherwise `rgba(...)`.
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        if self.3 == 1.0 {
+            f.write_str(&self.to_rgb_string())
+        } else {
+            f.write_str(&self.to_rgba_string())
+        }
+    }
+}
 
 impl SrgbaTuple {
     pub fn premultiply(self) -> Self {
@@ -436,7 +449,7 @@ impl SrgbaTuple {
     pub fn from_named(name: &str) -> Option<Self> {
         #[cfg(feature = "std")]
         {
-            return NAMED_COLORS.get(&name.to_ascii_lowercase()).cloned();
+            NAMED_COLORS.get(&name.to_ascii_lowercase()).cloned()
         }
         #[cfg(not(feature = "std"))]
         {
@@ -485,14 +498,6 @@ impl SrgbaTuple {
             (self.2 * 255.) as u8,
             (self.3 * 255.) as u8,
         )
-    }
-
-    pub fn to_string(self) -> String {
-        if self.3 == 1.0 {
-            self.to_rgb_string()
-        } else {
-            self.to_rgba_string()
-        }
     }
 
     /// Returns a string of the form `#RRGGBB`
@@ -739,7 +744,7 @@ fn x_parse_color_component(value: &str) -> Result<f32, ()> {
 
     for c in value.chars() {
         num_digits += 1;
-        component = component << 4;
+        component <<= 4;
 
         let nybble = match c.to_digit(16) {
             Some(v) => v as u16,
@@ -767,7 +772,7 @@ impl FromStr for SrgbaTuple {
         if !s.is_ascii() {
             return Err(());
         }
-        if s.len() > 0 && s.as_bytes()[0] == b'#' {
+        if !s.is_empty() && s.as_bytes()[0] == b'#' {
             // Probably `#RGB`
 
             let digits = (s.len() - 1) / 3;
@@ -787,7 +792,7 @@ impl FromStr for SrgbaTuple {
                     let mut component = 0u16;
 
                     for _ in 0..digits {
-                        component = component << 4;
+                        component <<= 4;
 
                         let nybble = match chars.next().unwrap().to_digit(16) {
                             Some(v) => v as u16,
@@ -854,8 +859,8 @@ impl FromStr for SrgbaTuple {
             } else {
                 Err(())
             }
-        } else if s.starts_with("hsl:") {
-            let fields: Vec<_> = s[4..].split_ascii_whitespace().collect();
+        } else if let Some(hsl) = s.strip_prefix("hsl:") {
+            let fields: Vec<_> = hsl.split_ascii_whitespace().collect();
             if fields.len() == 3 {
                 // Expected to be degrees in range 0-360, but we allow for negative and wrapping
                 let h: i32 = fields[0].parse().map_err(|_| ())?;
@@ -872,7 +877,7 @@ impl FromStr for SrgbaTuple {
                     let a = sat * light.min(1. - light);
                     let f = |n: f32| -> f32 {
                         let k = (n + hue / 30.) % 12.;
-                        light - a * (k - 3.).min(9. - k).min(1.).max(-1.)
+                        light - a * (k - 3.).min(9. - k).clamp(-1., 1.)
                     };
                     (f(0.), f(8.), f(4.))
                 }
@@ -1028,26 +1033,26 @@ impl LinearRgba {
     }
 
     #[cfg(feature = "std")]
-    fn to_oklaba(&self) -> [f32; 4] {
+    fn to_oklaba(self) -> [f32; 4] {
         let (r, g, b, alpha) = (self.0, self.1, self.2, self.3);
-        let l_ = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b).cbrt();
-        let m_ = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b).cbrt();
-        let s_ = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b).cbrt();
-        let l = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_;
-        let a = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_;
-        let b = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_;
+        let l_ = (0.412_221_46 * r + 0.536_332_55 * g + 0.051_445_995 * b).cbrt();
+        let m_ = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+        let s_ = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+        let l = 0.210_454_26 * l_ + 0.793_617_8 * m_ - 0.004_072_047 * s_;
+        let a = 1.977_998_5 * l_ - 2.428_592_2 * m_ + 0.450_593_7 * s_;
+        let b = 0.025_904_037 * l_ + 0.782_771_77 * m_ - 0.808_675_77 * s_;
         [l, a, b, alpha]
     }
 
     #[cfg(feature = "std")]
     fn from_oklaba(l: f32, a: f32, b: f32, alpha: f32) -> Self {
-        let l_ = (l + 0.3963377774 * a + 0.2158037573 * b).powi(3);
-        let m_ = (l - 0.1055613458 * a - 0.0638541728 * b).powi(3);
-        let s_ = (l - 0.0894841775 * a - 1.2914855480 * b).powi(3);
+        let l_ = (l + 0.396_337_78 * a + 0.215_803_76 * b).powi(3);
+        let m_ = (l - 0.105_561_346 * a - 0.063_854_17 * b).powi(3);
+        let s_ = (l - 0.089_484_18 * a - 1.291_485_5 * b).powi(3);
 
-        let r = 4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_;
-        let g = -1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_;
-        let b = -0.0041960863 * l_ - 0.7034186147 * m_ + 1.7076147010 * s_;
+        let r = 4.076_741_7 * l_ - 3.307_711_6 * m_ + 0.230_969_94 * s_;
+        let g = -1.268_438 * l_ + 2.609_757_4 * m_ - 0.341_319_38 * s_;
+        let b = -0.0041960863 * l_ - 0.703_418_6 * m_ + 1.707_614_7 * s_;
 
         Self(r, g, b, alpha)
     }
@@ -1085,10 +1090,8 @@ impl LinearRgba {
         let increased_ratio = reduced_col.contrast_ratio(other);
 
         // Prefer the reduced luminance version if the fg is dimmer than bg
-        if fg_lum < bg_lum {
-            if reduced_ratio >= min_ratio {
-                return Some(reduced_col);
-            }
+        if fg_lum < bg_lum && reduced_ratio >= min_ratio {
+            return Some(reduced_col);
         }
         // Otherwise, let's find a satisfactory alternative
         if increased_ratio >= min_ratio {

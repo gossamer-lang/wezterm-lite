@@ -1,40 +1,50 @@
-# Wez's Terminal
+# wezterm-lite
 
-<img height="128" alt="WezTerm Icon" src="https://raw.githubusercontent.com/wezterm/wezterm/main/assets/icon/wezterm-icon.svg" align="left"> *A GPU-accelerated cross-platform terminal emulator and multiplexer written by <a href="https://github.com/wez">@wez</a> and implemented in <a href="https://www.rust-lang.org/">Rust</a>*
+The terminal emulation core of [WezTerm](https://github.com/wezterm/wezterm),
+without the GUI, multiplexer, SSH client, font stack, or image decoding. It
+parses what a program writes to a terminal and keeps the screen, scrollback,
+modes and cursor that a front end draws.
 
-User facing docs and guide at: https://wezterm.org/
+Scrollback lines are packed into their text plus runs of attributes as they
+leave the screen, so a full history costs a small fraction of a cell grid.
 
-![Screenshot](docs/screenshots/two.png)
+## Crates
 
-*Screenshot of wezterm on macOS, running vim*
+| Crate | Path | What it holds |
+|---|---|---|
+| `wezterm-term` | `term` | The terminal state machine: screen, scrollback, modes, replies |
+| `wezterm-escape-parser` | `wezterm-escape-parser` | Escape sequences parsed into actions, and encoded back |
+| `vtparse` | `vtparse` | The byte-level VT state machine |
+| `wezterm-surface` | `wezterm-surface` | Lines, line storage and hyperlink rules |
+| `wezterm-cell` | `wezterm-cell` | Cells and their attributes |
+| `wezterm-char-props` | `wezterm-char-props` | Unicode width, grapheme and emoji properties |
+| `wezterm-bidi` | `bidi` | The Unicode Bidirectional Algorithm |
+| `wezterm-color-types` | `color-types` | Colors and color parsing |
+| `wezterm-input-types` | `wezterm-input-types` | Key codes and modifiers |
+| `wezterm-dynamic` | `wezterm-dynamic` | Configuration values and their derive macros |
+| `wezterm-blob-leases` | `wezterm-blob-leases` | Storage for image data |
 
-## Installation
+## Use
 
-https://wezterm.org/installation
+```toml
+[dependencies]
+wezterm-term = { git = "https://github.com/gossamer-lang/wezterm-lite", tag = "v0.1.0" }
+```
 
-## Getting help
+Feed program output with `Terminal::advance_bytes`, read lines through
+`Terminal::screen`, and implement `TerminalConfiguration` for scrollback size,
+palette, and the terminfo capabilities `termcap` reports.
 
-This is a spare time project, so please bear with me.  There are a couple of channels for support:
+The `images` feature of `wezterm-term` turns on Sixel, kitty graphics and
+iTerm2 images. Without it those sequences are parsed and ignored.
 
-* You can use the [GitHub issue tracker](https://github.com/wezterm/wezterm/issues) to see if someone else has a similar issue, or to file a new one.
-* Start or join a thread in our [GitHub Discussions](https://github.com/wezterm/wezterm/discussions); if you have general
-  questions or want to chat with other wezterm users, you're welcome here!
-* There is a [Matrix room via Element.io](https://matrix.to/#/#wezterm:matrix.org)
-  for (potentially!) real time discussions.
+## Releases
 
-The GitHub Discussions and Element/Gitter rooms are better suited for questions
-than bug reports, but don't be afraid to use whichever you are most comfortable
-using and we'll work it out.
+Pushing a tag `vX.Y.Z` runs the checks on Linux, macOS and Windows and
+publishes a GitHub release whose notes are the `## X.Y.Z` section of
+`CHANGELOG.md`. The tag must match the version of `wezterm-term`.
 
-## Supporting the Project
+## License
 
-If you use and like WezTerm, please consider sponsoring it: your support helps
-to cover the fees required to maintain the project and to validate the time
-spent working on it!
-
-[Read more about sponsoring](https://wezterm.org/sponsor.html).
-
-* [![Sponsor WezTerm](https://img.shields.io/github/sponsors/wez?label=Sponsor%20WezTerm&logo=github&style=for-the-badge)](https://github.com/sponsors/wez)
-* [Patreon](https://patreon.com/WezFurlong)
-* [Ko-Fi](https://ko-fi.com/wezfurlong)
-* [Liberapay](https://liberapay.com/wez)
+MIT, as WezTerm. See `LICENSE.md`; the copyright stays with Wez Furlong and
+the WezTerm contributors.

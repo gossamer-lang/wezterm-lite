@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  check:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Release notes
+        id: notes
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          crate=$(cargo metadata --format-version 1 --no-deps |
+            jq -r '.packages[] | select(.name == "wezterm-term") | .version')
+          if [ "$crate" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match wezterm-term $crate"
+            exit 1
+          fi
+          awk -v v="$version" '
+            $0 == "## " v { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q . notes.md; then
+            echo "::error::CHANGELOG.md has no ## $version section"
+            exit 1
+          fi
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag

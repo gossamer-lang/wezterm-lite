@@ -2,10 +2,10 @@
 
 use super::*;
 use crate::config::BidiMode;
+use crate::keys::KeyboardEncoding;
 use log::debug;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use termwiz::input::KeyboardEncoding;
 use wezterm_surface::SequenceNo;
 
 /// Holds the model of a screen.  This can either be the primary screen
@@ -363,7 +363,7 @@ impl Screen {
     /// Returns a copy of the lines in the screen (including scrollback)
     #[cfg(test)]
     pub fn all_lines(&self) -> Vec<Line> {
-        self.lines.iter().map(|l| l.clone()).collect()
+        self.lines.iter().cloned().collect()
     }
 
     pub fn insert_cell(

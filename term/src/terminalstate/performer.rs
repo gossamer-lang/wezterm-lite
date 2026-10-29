@@ -1,3 +1,4 @@
+use crate::keys::KeyboardEncoding;
 use crate::terminal::{Alert, Progress};
 use crate::terminalstate::{
     default_color_map, CharSet, MouseEncoding, TabStop, UnicodeVersionStackEntry,
@@ -10,9 +11,7 @@ use ordered_float::NotNan;
 use std::fmt::Write;
 use std::io::Write as _;
 use std::ops::{Deref, DerefMut};
-use termwiz::input::KeyboardEncoding;
 use unicode_normalization::{is_nfc_quick, IsNormalized, UnicodeNormalization};
-use url::Url;
 use wezterm_bidi::ParagraphDirectionHint;
 use wezterm_cell::{
     grapheme_column_width, is_white_space_grapheme, Cell, CellAttributes, SemanticType,
@@ -45,7 +44,7 @@ impl<'a> Deref for Performer<'a> {
 
 impl<'a> DerefMut for Performer<'a> {
     fn deref_mut(&mut self) -> &mut TerminalState {
-        &mut self.state
+        self.state
     }
 }
 
@@ -252,16 +251,12 @@ impl<'a> Performer<'a> {
     pub fn perform(&mut self, action: Action) {
         debug!("perform {:?}", action);
         if self.suppress_initial_title_change {
-            match &action {
-                Action::OperatingSystemCommand(osc) => match **osc {
-                    OperatingSystemCommand::SetIconNameAndWindowTitle(_) => {
-                        debug!("suppressed {:?}", osc);
-                        self.suppress_initial_title_change = false;
-                        return;
-                    }
-                    _ => {}
-                },
-                _ => {}
+            if let Action::OperatingSystemCommand(osc) = &action {
+                if let OperatingSystemCommand::SetIconNameAndWindowTitle(_) = **osc {
+                    debug!("suppressed {:?}", osc);
+                    self.suppress_initial_title_change = false;
+                    return;
+                }
             }
         }
         match action {
@@ -276,8 +271,14 @@ impl<'a> Performer<'a> {
             Action::OperatingSystemCommand(osc) => self.osc_dispatch(*osc),
             Action::Esc(esc) => self.esc_dispatch(esc),
             Action::CSI(csi) => self.csi_dispatch(csi),
-            Action::Sixel(sixel) => self.sixel(sixel),
+            #[cfg(feature = "images")]
+            Action::Sixel(sixel) => self.sixel(&sixel),
+            #[cfg(not(feature = "images"))]
+            Action::Sixel(_) => {}
             Action::XtGetTcap(names) => self.xt_get_tcap(names),
+            #[cfg(not(feature = "images"))]
+            Action::KittyImage(_) => {}
+            #[cfg(feature = "images")]
             Action::KittyImage(img) => {
                 self.flush_print();
                 if let Err(err) = self.kitty_img(*img) {
@@ -300,13 +301,13 @@ impl<'a> Performer<'a> {
                         // but note that *that* text has the validity value
                         // inverted; there's a note about this in the xterm
                         // ctlseqs docs.
-                        match s.data.as_slice() {
-                            &[b'"', b'p'] => {
+                        match *s.data.as_slice() {
+                            [b'"', b'p'] => {
                                 // DECSCL - select conformance level
                                 write!(self.writer, "{}1$r65;1\"p{}", DCS, ST).ok();
                                 self.writer.flush().ok();
                             }
-                            &[b'r'] => {
+                            [b'r'] => {
                                 // DECSTBM - top and bottom margins
                                 let margins = self.top_and_bottom_margins.clone();
                                 write!(
@@ -320,7 +321,7 @@ impl<'a> Performer<'a> {
                                 .ok();
                                 self.writer.flush().ok();
                             }
-                            &[b's'] => {
+                            [b's'] => {
                                 // DECSLRM - left and right margins
                                 let margins = self.left_and_right_margins.clone();
                                 write!(
@@ -472,7 +473,7 @@ impl<'a> Performer<'a> {
 
             ControlCode::Enquiry => {
                 let response = self.config.enq_answerback();
-                if response.len() > 0 {
+                if !response.is_empty() {
                     write!(self.writer, "{}", response).ok();
                     self.writer.flush().ok();
                 }
@@ -829,7 +830,10 @@ impl<'a> Performer<'a> {
                     write!(self.writer, "{}", response).ok();
                     self.writer.flush().ok();
                 }
+                #[cfg(feature = "images")]
                 ITermProprietary::File(image) => self.set_image(*image),
+                #[cfg(not(feature = "images"))]
+                ITermProprietary::File(_) => {}
                 ITermProprietary::SetUserVar { name, value } => {
                     self.user_vars.insert(name.clone(), value.clone());
                     if let Some(handler) = self.alert_handler.as_mut() {
@@ -885,12 +889,12 @@ impl<'a> Performer<'a> {
                 self.pen.set_semantic_type(SemanticType::Prompt);
             }
             OperatingSystemCommand::FinalTermSemanticPrompt(
-                FinalTermSemanticPrompt::MarkEndOfPromptAndStartOfInputUntilNextMarker { .. },
+                FinalTermSemanticPrompt::MarkEndOfPromptAndStartOfInputUntilNextMarker,
             ) => {
                 self.pen.set_semantic_type(SemanticType::Input);
             }
             OperatingSystemCommand::FinalTermSemanticPrompt(
-                FinalTermSemanticPrompt::MarkEndOfPromptAndStartOfInputUntilEndOfLine { .. },
+                FinalTermSemanticPrompt::MarkEndOfPromptAndStartOfInputUntilEndOfLine,
             ) => {
                 self.pen.set_semantic_type(SemanticType::Input);
                 self.clear_semantic_attribute_on_newline = true;
@@ -917,7 +921,7 @@ impl<'a> Performer<'a> {
                 }
             }
             OperatingSystemCommand::RxvtExtension(params) => {
-                if let Some("notify") = params.get(0).map(String::as_str) {
+                if let Some("notify") = params.first().map(String::as_str) {
                     let title = params.get(1);
                     let body = params.get(2);
                     let (title, body) = match (title.cloned(), body.cloned()) {
@@ -938,7 +942,8 @@ impl<'a> Performer<'a> {
                 }
             }
             OperatingSystemCommand::CurrentWorkingDirectory(url) => {
-                self.current_dir = Url::parse(&url).ok();
+                // The OSC 7 location, as the program sent it (normally a file:// URL).
+                self.current_dir = Some(url);
                 if let Some(handler) = self.alert_handler.as_mut() {
                     handler.alert(Alert::CurrentWorkingDirectoryChanged);
                 }
@@ -991,8 +996,7 @@ impl<'a> Performer<'a> {
             OperatingSystemCommand::ChangeDynamicColors(first_color, colors) => {
                 log::trace!("ChangeDynamicColors: {:?} {:?}", first_color, colors);
                 use wezterm_escape_parser::osc::DynamicColorNumber;
-                let mut idx: u8 = first_color as u8;
-                for color in colors {
+                for (idx, color) in (first_color as u8..).zip(colors) {
                     let which_color: Option<DynamicColorNumber> = FromPrimitive::from_u8(idx);
                     log::trace!("ChangeDynamicColors item: {:?}", which_color);
                     if let Some(which_color) = which_color {
@@ -1020,7 +1024,7 @@ impl<'a> Performer<'a> {
                                     // We set the border to the background color; we don't
                                     // have an escape that sets that independently, and this
                                     // way just looks better.
-                                    self.palette_mut().cursor_border = c.into();
+                                    self.palette_mut().cursor_border = c;
                                 }
                                 set_or_query!(cursor_bg)
                             }
@@ -1037,7 +1041,6 @@ impl<'a> Performer<'a> {
                             | DynamicColorNumber::TektronixCursorColor => {}
                         }
                     }
-                    idx += 1;
                 }
                 self.implicit_palette_reset_if_same_as_configured();
                 self.palette_did_change();

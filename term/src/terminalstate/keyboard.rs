@@ -1,7 +1,7 @@
 use crate::input::*;
+use crate::keys::{KeyCodeEncodeModes, KeyboardEncoding};
 use crate::TerminalState;
 use std::io::Write;
-use termwiz::input::{KeyCodeEncodeModes, KeyboardEncoding};
 
 impl TerminalState {
     fn effective_keyboard_encoding(&self) -> KeyboardEncoding {

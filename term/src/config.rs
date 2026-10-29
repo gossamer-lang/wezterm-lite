@@ -168,6 +168,13 @@ pub trait TerminalConfiguration: Downcast + std::fmt::Debug + Send + Sync {
         3
     }
 
+    /// The value XTGETTCAP reports for terminfo capability `name`, from the
+    /// terminfo entry the embedder advertises in TERM; a boolean capability
+    /// that is set reports "1". None reports the capability as unknown.
+    fn termcap(&self, _name: &str) -> Option<String> {
+        None
+    }
+
     fn enq_answerback(&self) -> String {
         "".to_string()
     }

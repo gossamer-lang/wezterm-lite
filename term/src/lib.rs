@@ -27,6 +27,7 @@ pub mod config;
 pub use config::TerminalConfiguration;
 
 pub mod input;
+pub mod keys;
 pub use crate::input::*;
 
 pub use wezterm_cell::*;

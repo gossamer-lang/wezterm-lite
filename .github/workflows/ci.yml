@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all --check
+      - name: Build
+        run: cargo build --release --workspace
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy, all features
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Test, all features
+        run: cargo test --workspace --all-features
+      - name: vtparse without std
+        shell: bash
+        run: |
+          cargo check -p vtparse --no-default-features --features alloc
+          cargo check -p vtparse --no-default-features --features no_std

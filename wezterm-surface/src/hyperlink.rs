@@ -79,9 +79,9 @@ impl From<&Regex> for RegexWrap {
     }
 }
 
-impl Into<Regex> for RegexWrap {
-    fn into(self) -> Regex {
-        self.0
+impl From<RegexWrap> for Regex {
+    fn from(val: RegexWrap) -> Self {
+        val.0
     }
 }
 
@@ -166,7 +166,7 @@ pub const GENERIC_HYPERLINK_PATTERN: &str = r"\b\w+://\S+[_/a-zA-Z0-9-]";
 
 impl Rule {
     /// Construct a new rule.  It may fail if the regex is invalid.
-    pub fn new(regex: &str, format: &str) -> Result<Self, fancy_regex::Error> {
+    pub fn new(regex: &str, format: &str) -> Result<Self, Box<fancy_regex::Error>> {
         Self::with_highlight(regex, format, 0)
     }
 
@@ -174,9 +174,9 @@ impl Rule {
         regex: &str,
         format: &str,
         highlight: usize,
-    ) -> Result<Self, fancy_regex::Error> {
+    ) -> Result<Self, Box<fancy_regex::Error>> {
         Ok(Self {
-            regex: Regex::new(regex)?,
+            regex: Regex::new(regex).map_err(Box::new)?,
             format: format.to_owned(),
             highlight,
         })
@@ -187,19 +187,17 @@ impl Rule {
     pub fn match_hyperlinks(line: &str, rules: &[Rule]) -> Vec<RuleMatch> {
         let mut matches = Vec::new();
         for rule in rules.iter() {
-            for capture_result in rule.regex.captures_iter(line) {
-                if let Ok(captures) = capture_result {
-                    let m = Match { rule, captures };
-                    if m.highlight().is_some() {
-                        matches.push(m);
-                    }
+            for captures in rule.regex.captures_iter(line).flatten() {
+                let m = Match { rule, captures };
+                if m.highlight().is_some() {
+                    matches.push(m);
                 }
             }
         }
         // Sort the matches by descending match length.
         // This is to avoid confusion if multiple rules match the
         // same sections of text.
-        matches.sort_by(|a, b| b.len().cmp(&a.len()));
+        matches.sort_by_key(|m| core::cmp::Reverse(m.len()));
 
         matches
             .into_iter()
