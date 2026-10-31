@@ -228,3 +228,25 @@ fn an_iterm_image_is_decoded_on_arrival() {
         other => panic!("expected Rgba8, got {:?}", other),
     }
 }
+
+/// The rows of the screen that show an image.
+fn image_rows(term: &TestTerm) -> usize {
+    term.screen()
+        .visible_lines()
+        .iter()
+        .filter(|line| {
+            line.visible_cells()
+                .any(|cell| cell.attrs().images().is_some())
+        })
+        .count()
+}
+
+/// A kitty placement given only columns keeps its image's proportions, so a
+/// square image four columns of 8x16 cells wide spans two rows.
+#[test]
+fn kitty_columns_alone_keep_the_aspect_ratio() {
+    let mut term = TestTerm::new(6, 10, 0);
+    let seq = format!("\x1b_Ga=T,f=32,s=2,v=2,c=4;{}\x1b\\", TINY_RGBA_BASE64);
+    term.print(seq.as_bytes());
+    k9::assert_equal!(image_rows(&term), 2);
+}

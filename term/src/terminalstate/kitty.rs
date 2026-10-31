@@ -89,6 +89,47 @@ impl KittyImageState {
 }
 
 impl TerminalState {
+    /// The cells a placement of a `width` by `height` region spans. Columns
+    /// or rows given alone set the other by the region's aspect ratio, as
+    /// kitty does.
+    fn kitty_span(
+        &self,
+        columns: Option<u32>,
+        rows: Option<u32>,
+        width: u32,
+        height: u32,
+    ) -> (Option<usize>, Option<usize>) {
+        let screen = self.screen();
+        let cell_width = (self.pixel_width / screen.physical_cols.max(1)) as u64;
+        let cell_height = (self.pixel_height / screen.physical_rows.max(1)) as u64;
+        let (width, height) = (u64::from(width), u64::from(height));
+        let given = (columns.map(u64::from), rows.map(u64::from));
+        let spanned = if cell_width == 0 || cell_height == 0 || width == 0 || height == 0 {
+            given
+        } else {
+            match given {
+                (Some(c), None) => (
+                    Some(c),
+                    Some(
+                        (c * cell_width * height)
+                            .div_ceil(width * cell_height)
+                            .max(1),
+                    ),
+                ),
+                (None, Some(r)) => (
+                    Some(
+                        (r * cell_height * width)
+                            .div_ceil(height * cell_width)
+                            .max(1),
+                    ),
+                    Some(r),
+                ),
+                both => both,
+            }
+        };
+        (spanned.0.map(|c| c as usize), spanned.1.map(|r| r as usize))
+    }
+
     fn kitty_img_place(
         &mut self,
         image_id: Option<u32>,
@@ -132,6 +173,16 @@ impl TerminalState {
         })?);
 
         let (image_width, image_height) = img.data().dimensions()?;
+        let shown_width = placement
+            .w
+            .unwrap_or(image_width)
+            .min(image_width.saturating_sub(placement.x.unwrap_or(0)));
+        let shown_height = placement
+            .h
+            .unwrap_or(image_height)
+            .min(image_height.saturating_sub(placement.y.unwrap_or(0)));
+        let (columns, rows) =
+            self.kitty_span(placement.columns, placement.rows, shown_width, shown_height);
 
         let info = self.assign_image_to_cells(ImageAttachParams {
             image_width,
@@ -145,8 +196,8 @@ impl TerminalState {
             data: img,
             style: ImageAttachStyle::Kitty,
             z_index: placement.z_index.unwrap_or(0),
-            columns: placement.columns.map(|x| x as usize),
-            rows: placement.rows.map(|x| x as usize),
+            columns,
+            rows,
             image_id: Some(image_id),
             placement_id: placement.placement_id,
             do_not_move_cursor: placement.do_not_move_cursor,

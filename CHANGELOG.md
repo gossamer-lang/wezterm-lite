@@ -11,6 +11,7 @@
 - Decoded pixels are `Arc<[u8]>`, so a renderer holds a frame without copying it; an in-place kitty frame edit copies only a frame something else still holds.
 - An animation decodes at most 100 MB of frames; a longer one keeps its first frame.
 - `CellAttributes::detach_image_data` removes the attachments that show one image.
+- A kitty placement given only columns or only rows sets the other from the image's aspect ratio, as kitty does, where it kept the image's own height in pixels and stretched it.
 - Key encoding lives in `wezterm_term::keys`, so the core no longer depends on termwiz.
 - XTGETTCAP answers come from `TerminalConfiguration::termcap`, so an embedder reports the terminfo entry it advertises.
 - `TerminalState::get_current_dir` returns the OSC 7 location as the program sent it.
