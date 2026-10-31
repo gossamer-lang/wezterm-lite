@@ -359,8 +359,12 @@ pub struct TerminalState {
 
     writer: BufWriter<Box<dyn std::io::Write + Send>>,
 
+    /// Recent images by content, so the same image sent again is shared;
+    /// it holds none alive.
     #[cfg(feature = "images")]
-    image_cache: lru::LruCache<[u8; 32], Arc<ImageData>>,
+    image_cache: lru::LruCache<[u8; 32], std::sync::Weak<ImageData>>,
+    #[cfg(feature = "images")]
+    image_budget: image::ImageBudget,
     sixel_scrolls_right: bool,
 
     user_vars: HashMap<String, String>,
@@ -509,6 +513,8 @@ impl TerminalState {
             writer,
             #[cfg(feature = "images")]
             image_cache: lru::LruCache::new(NonZeroUsize::new(16).unwrap()),
+            #[cfg(feature = "images")]
+            image_budget: Default::default(),
             user_vars: HashMap::new(),
             #[cfg(feature = "images")]
             kitty_img: Default::default(),

@@ -28,29 +28,49 @@ pub struct KittyImageState {
 }
 
 impl KittyImageState {
+    /// The images the store holds for later placements.
+    pub(crate) fn stored(&self) -> impl Iterator<Item = &Arc<ImageData>> {
+        self.id_to_data.values()
+    }
+
     fn remove_data_for_id(&mut self, image_id: u32) {
         if let Some(data) = self.id_to_data.remove(&image_id) {
             self.used_memory = self.used_memory.saturating_sub(data.len());
         }
     }
 
-    fn record_id_to_data(&mut self, image_id: u32, data: Arc<ImageData>) {
+    fn record_id_to_data(&mut self, image_id: u32, data: Arc<ImageData>, budget: usize) {
         if image_id != 0 {
             self.remove_data_for_id(image_id);
         }
-        self.prune_unreferenced();
+        self.prune_unreferenced(budget, None);
         self.used_memory += data.len();
         self.id_to_data.insert(image_id, data);
     }
 
-    fn prune_unreferenced(&mut self) {
-        let budget = 320 * 1024 * 1024; // FIXME: make this configurable
+    /// Forgets the placements that show `data`, whose cells no longer do.
+    pub(crate) fn forget_placements_of(&mut self, data: &Arc<ImageData>) {
+        let ids: HashSet<u32> = self
+            .id_to_data
+            .iter()
+            .filter(|(_, stored)| Arc::ptr_eq(stored, data))
+            .map(|(id, _)| *id)
+            .collect();
+        self.placements.retain(|(id, _), _| !ids.contains(id));
+    }
+
+    /// Drops stored images no placement shows, other than `keep`, until the
+    /// store holds at most `budget` bytes.
+    pub(crate) fn prune_unreferenced(&mut self, budget: usize, keep: Option<&Arc<ImageData>>) {
         if self.used_memory > budget {
             let referenced: HashSet<u32> = self.placements.keys().map(|(k, _)| *k).collect();
             let target = self.used_memory - budget;
             let mut freed = 0;
             self.id_to_data.retain(|id, data| {
-                if referenced.contains(id) || freed > target {
+                if referenced.contains(id)
+                    || keep.is_some_and(|keep| Arc::ptr_eq(keep, data))
+                    || freed > target
+                {
                     true
                 } else {
                     freed += data.len();
@@ -466,7 +486,7 @@ impl TerminalState {
                 let src = clip_view(
                     *width,
                     *height,
-                    data.as_mut_slice(),
+                    writable(data),
                     frame.src_x,
                     frame.src_y,
                     frame.w,
@@ -474,7 +494,7 @@ impl TerminalState {
                 )?;
 
                 let mut dest: ImageBuffer<Rgba<u8>, &mut [u8]> =
-                    ImageBuffer::from_raw(*width, *height, data.as_mut_slice())
+                    ImageBuffer::from_raw(*width, *height, writable(data))
                         .ok_or_else(|| anyhow::anyhow!("ill formed image"))?;
 
                 blit(
@@ -508,7 +528,7 @@ impl TerminalState {
                 let src = clip_view(
                     *width,
                     *height,
-                    frames[src_frame - 1].as_mut_slice(),
+                    writable(&mut frames[src_frame - 1]),
                     frame.src_x,
                     frame.src_y,
                     frame.w,
@@ -516,7 +536,7 @@ impl TerminalState {
                 )?;
 
                 let mut dest: ImageBuffer<Rgba<u8>, &mut [u8]> =
-                    ImageBuffer::from_raw(*width, *height, frames[target_frame - 1].as_mut_slice())
+                    ImageBuffer::from_raw(*width, *height, writable(&mut frames[target_frame - 1]))
                         .ok_or_else(|| anyhow::anyhow!("ill formed image"))?;
 
                 blit(
@@ -559,7 +579,7 @@ impl TerminalState {
                 width,
                 height,
                 ..
-            } => RgbaImage::from_vec(width, height, data)
+            } => RgbaImage::from_vec(width, height, data.to_vec())
                 .ok_or_else(|| anyhow::anyhow!("data isn't rgba8"))?,
             wat => anyhow::bail!("data isn't rgba8 {:?}", wat),
         };
@@ -622,8 +642,8 @@ impl TerminalState {
                         // Edit in place
                         let len = data.len();
                         let mut anim_img: ImageBuffer<Rgba<u8>, &mut [u8]> =
-                            ImageBuffer::from_raw(*width, *height, data.as_mut_slice())
-                                .ok_or_else(|| {
+                            ImageBuffer::from_raw(*width, *height, writable(data)).ok_or_else(
+                                || {
                                     anyhow::anyhow!(
                                         "ImageBuffer::from_raw failed for single \
                                          frame of {}x{} ({} bytes)",
@@ -631,7 +651,8 @@ impl TerminalState {
                                         height,
                                         len
                                     )
-                                })?;
+                                },
+                            )?;
 
                         blit(&mut anim_img, &img, x, y, frame.composition_mode)?;
 
@@ -641,7 +662,7 @@ impl TerminalState {
                         // Create a second frame
 
                         let mut new_frame = if base_frame.is_some() {
-                            RgbaImage::from_vec(*width, *height, data.clone()).unwrap()
+                            RgbaImage::from_vec(*width, *height, data.to_vec()).unwrap()
                         } else {
                             RgbaImage::from_pixel(*width, *height, background_pixel)
                         };
@@ -651,7 +672,7 @@ impl TerminalState {
                         let new_frame_data = new_frame.into_vec();
                         let new_frame_hash = ImageDataType::hash_bytes(&new_frame_data);
 
-                        let frames = vec![std::mem::take(data), new_frame_data];
+                        let frames = vec![std::mem::take(data), new_frame_data.into()];
                         let durations = vec![Duration::from_millis(0), frame_gap];
                         let hashes = vec![*hash, new_frame_hash];
 
@@ -690,7 +711,7 @@ impl TerminalState {
                                 n,
                                 frames.len()
                             );
-                            RgbaImage::from_vec(*width, *height, frames[n - 1].clone()).unwrap()
+                            RgbaImage::from_vec(*width, *height, frames[n - 1].to_vec()).unwrap()
                         }
                     };
 
@@ -699,7 +720,7 @@ impl TerminalState {
                     let new_frame_data = new_frame.into_vec();
                     let new_frame_hash = ImageDataType::hash_bytes(&new_frame_data);
 
-                    frames.push(new_frame_data);
+                    frames.push(new_frame_data.into());
                     hashes.push(new_frame_hash);
                     durations.push(frame_gap);
                 } else {
@@ -714,7 +735,7 @@ impl TerminalState {
 
                     let len = frames[frame_no - 1].len();
                     let mut anim_img: ImageBuffer<Rgba<u8>, &mut [u8]> =
-                        ImageBuffer::from_raw(*width, *height, frames[frame_no - 1].as_mut_slice())
+                        ImageBuffer::from_raw(*width, *height, writable(&mut frames[frame_no - 1]))
                             .ok_or_else(|| {
                                 anyhow::anyhow!(
                                     "ImageBuffer::from_raw failed for single \
@@ -828,7 +849,8 @@ impl TerminalState {
         let img = self
             .raw_image_to_image_data(img)
             .context("storing image data")?;
-        self.kitty_img.record_id_to_data(image_id, img);
+        let budget = self.config.image_memory_limit();
+        self.kitty_img.record_id_to_data(image_id, img, budget);
 
         if image_number.is_some() {
             self.kitty_send_response(
@@ -971,4 +993,14 @@ where
         }
     }
     Ok(())
+}
+
+/// The bytes of `data` to edit in place, copied first when a renderer still
+/// holds them so it keeps the frame it was given.
+fn writable(data: &mut Arc<[u8]>) -> &mut [u8] {
+    if Arc::get_mut(data).is_none() {
+        *data = Arc::from(&**data);
+    }
+    // The copy above leaves `data` with no other owner.
+    Arc::get_mut(data).unwrap()
 }

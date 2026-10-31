@@ -4,6 +4,13 @@
 
 - Initial release: WezTerm's terminal core (`wezterm-term` and the crates under it) as its own workspace, from WezTerm commit e68a8ec.
 - Sixel, kitty graphics and iTerm2 images are behind the `images` feature, off by default; without it image sequences are parsed and ignored.
+- With `images`, the `image` crate builds only its PNG, GIF, JPEG and WebP decoders, 18 crates where its defaults pull 71, including an AV1 encoder.
+- Images from all three protocols share one memory limit, `TerminalConfiguration::image_memory_limit` (64 MiB by default): a new image detaches the oldest placements of other images until it fits, and one larger than the limit is refused. Kitty's store prunes to the same limit instead of a fixed 320 MB.
+- The cache that shares a repeated image no longer keeps it alive once no cell shows it.
+- iTerm2 images are decoded as they arrive, so the limit counts the pixels a renderer draws.
+- Decoded pixels are `Arc<[u8]>`, so a renderer holds a frame without copying it; an in-place kitty frame edit copies only a frame something else still holds.
+- An animation decodes at most 100 MB of frames; a longer one keeps its first frame.
+- `CellAttributes::detach_image_data` removes the attachments that show one image.
 - Key encoding lives in `wezterm_term::keys`, so the core no longer depends on termwiz.
 - XTGETTCAP answers come from `TerminalConfiguration::termcap`, so an embedder reports the terminfo entry it advertises.
 - `TerminalState::get_current_dir` returns the OSC 7 location as the program sent it.

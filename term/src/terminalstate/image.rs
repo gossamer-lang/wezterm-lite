@@ -3,7 +3,8 @@ use anyhow::Context;
 use humansize::{SizeFormatter, DECIMAL};
 use num_traits::{One, Zero};
 use ordered_float::NotNan;
-use std::sync::Arc;
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Arc, Weak};
 use wezterm_cell::image::{ImageCell, ImageDataType};
 use wezterm_cell::Cell;
 use wezterm_surface::change::ImageData;
@@ -61,8 +62,116 @@ pub enum ImageAttachStyle {
     Kitty,
 }
 
+/// One image placed on a screen and the rows it covers.
+#[derive(Debug)]
+struct Placed {
+    data: Weak<ImageData>,
+    first_row: StableRowIndex,
+    rows: usize,
+    alternate: bool,
+}
+
+/// The images placed on the screens, oldest first, so the oldest give way
+/// when the images held would exceed the terminal's image memory limit.
+#[derive(Debug, Default)]
+pub(crate) struct ImageBudget {
+    placed: VecDeque<Placed>,
+}
+
 impl TerminalState {
+    /// The bytes of the distinct images the screens and the kitty store
+    /// hold, with `adding`.
+    fn held_image_bytes(&mut self, adding: &Arc<ImageData>) -> usize {
+        self.image_budget
+            .placed
+            .retain(|p| p.data.strong_count() > 0);
+        let mut seen = HashSet::new();
+        let placed = self
+            .image_budget
+            .placed
+            .iter()
+            .filter_map(|p| p.data.upgrade());
+        let stored = self.kitty_img.stored().cloned();
+        placed
+            .chain(stored)
+            .chain(std::iter::once(Arc::clone(adding)))
+            .filter(|image| seen.insert(Arc::as_ptr(image)))
+            .map(|image| image.len())
+            .sum()
+    }
+
+    /// Detaches the oldest placements of other images until the images
+    /// held, `data` included, fit the image memory limit.
+    fn make_room_for_image(&mut self, data: &Arc<ImageData>) -> anyhow::Result<()> {
+        let limit = self.config.image_memory_limit();
+        anyhow::ensure!(
+            data.len() <= limit,
+            "Ignoring image of {} bytes: images may hold at most {} bytes",
+            data.len(),
+            limit
+        );
+        let mut turns = self.image_budget.placed.len();
+        while turns > 0 && self.held_image_bytes(data) > limit {
+            turns -= 1;
+            let Some(oldest) = self.image_budget.placed.pop_front() else {
+                break;
+            };
+            let Some(image) = oldest.data.upgrade() else {
+                continue;
+            };
+            if Arc::ptr_eq(&image, data) {
+                // The image being placed stays, so its earlier placements do too.
+                self.image_budget.placed.push_back(oldest);
+                continue;
+            }
+            self.detach_placed_image(&image, &oldest);
+        }
+        if self.held_image_bytes(data) > limit {
+            self.kitty_img.prune_unreferenced(0, Some(data));
+        }
+        let held = self.held_image_bytes(data);
+        anyhow::ensure!(
+            held <= limit,
+            "Ignoring image: images would hold {held} bytes, over the limit of {limit}"
+        );
+        Ok(())
+    }
+
+    fn detach_placed_image(&mut self, image: &Arc<ImageData>, placed: &Placed) {
+        self.kitty_img.forget_placements_of(image);
+        let seqno = self.seqno;
+        let screen = if placed.alternate {
+            &mut self.screen.alt_screen
+        } else {
+            &mut self.screen.screen
+        };
+        let rows = placed.first_row..placed.first_row + placed.rows as StableRowIndex;
+        for idx in screen.stable_range(&rows) {
+            let line = screen.line_mut(idx);
+            for cell in line.cells_mut() {
+                cell.attrs_mut().detach_image_data(image);
+            }
+            line.update_last_change_seqno(seqno);
+        }
+    }
+
     pub(crate) fn assign_image_to_cells(
+        &mut self,
+        params: ImageAttachParams,
+    ) -> anyhow::Result<PlacementInfo> {
+        let data = Arc::clone(&params.data);
+        self.make_room_for_image(&data)?;
+        let info = self.attach_image_to_cells(params)?;
+        self.image_budget.placed.push_back(Placed {
+            data: Arc::downgrade(&data),
+            first_row: info.first_row,
+            rows: info.rows,
+            alternate: self.screen.alt_screen_is_active,
+        });
+        Ok(info)
+    }
+
+    fn attach_image_to_cells(
         &mut self,
         params: ImageAttachParams,
     ) -> anyhow::Result<PlacementInfo> {
@@ -288,12 +397,12 @@ impl TerminalState {
         data: ImageDataType,
     ) -> anyhow::Result<Arc<ImageData>> {
         let key = data.compute_hash();
-        if let Some(item) = self.image_cache.get(&key) {
-            Ok(Arc::clone(item))
+        if let Some(item) = self.image_cache.get(&key).and_then(Weak::upgrade) {
+            Ok(item)
         } else {
             let data = data.swap_out()?;
             let image_data = Arc::new(ImageData::with_data(data));
-            self.image_cache.put(key, Arc::clone(&image_data));
+            self.image_cache.put(key, Arc::downgrade(&image_data));
             Ok(image_data)
         }
     }

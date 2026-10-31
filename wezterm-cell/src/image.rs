@@ -240,9 +240,9 @@ pub enum ImageDataType {
         )]
         BlobLease,
     ),
-    /// Data is RGBA u8 data
+    /// Data is RGBA u8 data, shared so a renderer can hold it without a copy.
     Rgba8 {
-        data: Vec<u8>,
+        data: Arc<[u8]>,
         width: u32,
         height: u32,
         /// sha256 of `data`.
@@ -254,7 +254,7 @@ pub enum ImageDataType {
         width: u32,
         height: u32,
         durations: Vec<Duration>,
-        frames: Vec<Vec<u8>>,
+        frames: Vec<Arc<[u8]>>,
         /// sha256 of each `frames`.
         /// Must be updated whenever a frame changes.
         hashes: Vec<[u8; 32]>,
@@ -313,7 +313,7 @@ impl ImageDataType {
         Self::Rgba8 {
             width,
             height,
-            data,
+            data: data.into(),
             hash,
         }
     }
@@ -346,7 +346,7 @@ impl ImageDataType {
             } => {
                 let mut hasher = sha2::Sha256::new();
                 for data in frames {
-                    hasher.update(data);
+                    hasher.update(&**data);
                 }
                 for d in durations {
                     let d = d.as_secs_f32();
@@ -421,7 +421,7 @@ impl ImageDataType {
                 let cursor = std::io::Cursor::new(&*data);
                 match format {
                     ImageFormat::Gif => image::codecs::gif::GifDecoder::new(cursor)
-                        .and_then(|decoder| decoder.into_frames().collect_frames())
+                        .and_then(|decoder| collect_capped(decoder.into_frames()))
                         .map(|frames| {
                             if frames.is_empty() {
                                 log::error!("decoded image has 0 frames, using placeholder");
@@ -443,10 +443,7 @@ impl ImageDataType {
                             _ => return Self::EncodedFile(data),
                         };
                         if decoder.is_apng().unwrap_or(false) {
-                            match decoder
-                                .apng()
-                                .and_then(|d| d.into_frames().collect_frames())
-                            {
+                            match decoder.apng().and_then(|d| collect_capped(d.into_frames())) {
                                 Ok(frames) if frames.is_empty() => {
                                     log::error!("decoded image has 0 frames, using placeholder");
                                     Self::placeholder()
@@ -463,7 +460,7 @@ impl ImageDataType {
                             Ok(d) => d,
                             _ => return Self::EncodedFile(data),
                         };
-                        match decoder.into_frames().collect_frames() {
+                        match collect_capped(decoder.into_frames()) {
                             Ok(frames) if frames.is_empty() => {
                                 log::error!("decoded image has 0 frames, using placeholder");
                                 Self::placeholder()
@@ -500,7 +497,7 @@ impl ImageDataType {
             height = h;
             let data = image.into_vec();
             hashes.push(Self::hash_bytes(&data));
-            frames.push(data);
+            frames.push(data.into());
         }
         Self::AnimRgba8 {
             width,
@@ -522,13 +519,35 @@ impl ImageDataType {
                 Self::Rgba8 {
                     width,
                     height,
-                    data,
+                    data: data.into(),
                     hash,
                 }
             }
             _ => Self::EncodedFile(data),
         }
     }
+}
+
+/// The most bytes an animation's frames may decode to.
+#[cfg(feature = "use_image")]
+pub const MAX_DECODED_BYTES: usize = 100_000_000;
+
+/// The frames of an animation, up to `MAX_DECODED_BYTES` of them; an
+/// animation that would decode to more keeps only its first frame.
+#[cfg(feature = "use_image")]
+fn collect_capped(frames: image::Frames<'_>) -> image::ImageResult<Vec<image::Frame>> {
+    let mut kept = Vec::new();
+    let mut bytes = 0usize;
+    for frame in frames {
+        let frame = frame?;
+        bytes = bytes.saturating_add(frame.buffer().as_raw().len());
+        if bytes > MAX_DECODED_BYTES {
+            kept.truncate(1);
+            break;
+        }
+        kept.push(frame);
+    }
+    Ok(kept)
 }
 
 #[derive(thiserror::Error, Debug)]

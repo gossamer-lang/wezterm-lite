@@ -124,3 +124,106 @@ fn kitty_frame_edit_keeps_the_stored_hash_current() {
 
     assert_ne!(edited_hash, transmitted_hash);
 }
+
+#[derive(Debug)]
+struct ImageLimitConfig {
+    limit: usize,
+}
+
+impl TerminalConfiguration for ImageLimitConfig {
+    fn color_palette(&self) -> ColorPalette {
+        ColorPalette::default()
+    }
+
+    fn image_memory_limit(&self) -> usize {
+        self.limit
+    }
+}
+
+fn image_limited_term(limit: usize) -> Terminal {
+    Terminal::new(
+        TerminalSize {
+            rows: 6,
+            cols: 10,
+            pixel_width: 80,
+            pixel_height: 96,
+            dpi: 0,
+        },
+        Arc::new(ImageLimitConfig { limit }),
+        "WezTerm",
+        "O_o",
+        Box::new(Vec::new()),
+    )
+}
+
+/// An 8x6 sixel in one color, 192 bytes of RGBA, on a line of its own.
+fn sixel(red: u8, green: u8, blue: u8) -> String {
+    format!("\x1bPq#1;2;{red};{green};{blue}#1!8~\x1b\\\r\n")
+}
+
+/// The first color of each image on the screen, top to bottom.
+fn image_colors(term: &Terminal) -> Vec<[u8; 3]> {
+    let mut colors = vec![];
+    for line in term.screen().visible_lines().iter() {
+        for cell in line.visible_cells() {
+            for image in cell.attrs().images().unwrap_or_default() {
+                if let ImageDataType::Rgba8 { data, .. } = &*image.image_data().data() {
+                    colors.push([data[0], data[1], data[2]]);
+                }
+            }
+        }
+    }
+    colors
+}
+
+/// Images past the memory limit take the place of the oldest ones.
+#[test]
+fn images_over_the_memory_limit_replace_the_oldest() {
+    let mut term = image_limited_term(400);
+    term.advance_bytes(sixel(100, 0, 0));
+    term.advance_bytes(sixel(0, 100, 0));
+    k9::assert_equal!(image_colors(&term), vec![[255, 0, 0], [0, 255, 0]]);
+
+    term.advance_bytes(sixel(0, 0, 100));
+    k9::assert_equal!(image_colors(&term), vec![[0, 255, 0], [0, 0, 255]]);
+}
+
+/// The same image placed again is held once, so it takes no more room.
+#[test]
+fn an_image_placed_again_is_held_once() {
+    let mut term = image_limited_term(400);
+    term.advance_bytes(sixel(100, 0, 0));
+    term.advance_bytes(sixel(0, 100, 0));
+    term.advance_bytes(sixel(100, 0, 0));
+    k9::assert_equal!(
+        image_colors(&term),
+        vec![[255, 0, 0], [0, 255, 0], [255, 0, 0]]
+    );
+}
+
+/// An image larger than the whole limit is refused and the screen keeps
+/// the images it had.
+#[test]
+fn an_image_larger_than_the_limit_is_refused() {
+    let mut term = image_limited_term(300);
+    term.advance_bytes(sixel(100, 0, 0));
+    term.advance_bytes("\x1bPq#1;2;0;100;0#1!16~\x1b\\\r\n");
+    k9::assert_equal!(image_colors(&term), vec![[255, 0, 0]]);
+}
+
+/// An iTerm2 image is decoded as it arrives, so the memory it holds is the
+/// pixels it shows.
+#[test]
+fn an_iterm_image_is_decoded_on_arrival() {
+    let mut term = TestTerm::new(3, 10, 0);
+    let seq = format!("\x1b]1337;File=inline=1:{}\x07", TINY_PNG_BASE64);
+    term.print(seq.as_bytes());
+    let image = first_image(&term);
+    let data = image.data();
+    match &*data {
+        ImageDataType::Rgba8 { width, height, .. } => {
+            k9::assert_equal!((*width, *height), (11, 11));
+        }
+        other => panic!("expected Rgba8, got {:?}", other),
+    }
+}

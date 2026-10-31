@@ -108,8 +108,9 @@ impl TerminalState {
             | (true, ImageFormat::WebP)
             | (false, _) => {
                 // Don't resample things that might be animations,
-                // or things that don't need resampling
-                ImageDataType::EncodedFile(image.data)
+                // or things that don't need resampling. Decoding here lets
+                // the image budget count the pixels a renderer draws.
+                ImageDataType::EncodedFile(image.data).decode()
             }
             (true, _) => match ::image::load_from_memory(&image.data) {
                 Ok(im) => {

@@ -183,6 +183,12 @@ pub trait TerminalConfiguration: Downcast + std::fmt::Debug + Send + Sync {
         false
     }
 
+    /// The most bytes the images a terminal holds may take, across every
+    /// image protocol; the oldest placements give way to new ones.
+    fn image_memory_limit(&self) -> usize {
+        64 * 1024 * 1024
+    }
+
     fn enable_kitty_keyboard(&self) -> bool {
         false
     }

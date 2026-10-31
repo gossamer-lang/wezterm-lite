@@ -382,6 +382,14 @@ impl CellAttributes {
         self.deallocate_fat_attributes_if_none();
     }
 
+    /// Removes the attachments that show `data`.
+    pub fn detach_image_data(&mut self, data: &Arc<crate::image::ImageData>) {
+        if let Some(fat) = self.fat.as_mut() {
+            fat.image.retain(|im| !Arc::ptr_eq(im.image_data(), data));
+        }
+        self.deallocate_fat_attributes_if_none();
+    }
+
     /// Add an image attachement, preserving any existing attachments.
     /// The list of images is maintained in z-index order
     pub fn attach_image(&mut self, image: ImageCell) -> &mut Self {
