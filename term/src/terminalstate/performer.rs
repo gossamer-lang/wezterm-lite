@@ -157,6 +157,70 @@ impl<'a> Performer<'a> {
         true
     }
 
+    // Moves the cursor to the start of the next line, marking the line it
+    // leaves as wrapped so a resize can reflow it.
+    fn wrap_to_next_line(&mut self, seqno: wezterm_surface::SequenceNo) {
+        // Since we're implicitly moving the cursor to the next
+        // line, we need to tag the current position as wrapped
+        // so that we can correctly reflow it if the window is
+        // resized.
+        {
+            let y = self.cursor.y;
+            let is_conpty = self.state.enable_conpty_quirks;
+            let screen = self.screen_mut();
+            let y = screen.phys_row(y);
+
+            fn makes_sense_to_wrap(s: &str) -> bool {
+                let len = s.len();
+                match (len, s.chars().next()) {
+                    (1, Some(c)) => c.is_alphanumeric() || c.is_ascii_punctuation(),
+                    _ => true,
+                }
+            }
+
+            let should_mark_wrapped = !is_conpty
+                || screen
+                    .line_mut(y)
+                    .visible_cells()
+                    .last()
+                    .map(|cell| makes_sense_to_wrap(cell.str()))
+                    .unwrap_or(false);
+            if should_mark_wrapped {
+                screen.line_mut(y).set_last_cell_was_wrapped(true, seqno);
+            }
+        }
+        self.new_line(true);
+    }
+
+    // Prints `text`, printable ASCII with no character set remapping in
+    // effect and insert mode off: every byte is one cell of its own, so runs
+    // up to the right margin are set at once.
+    fn print_ascii(&mut self, text: &str, seqno: wezterm_surface::SequenceNo) {
+        let mut rest = text;
+        while !rest.is_empty() {
+            if self.wrap_next {
+                self.wrap_to_next_line(seqno);
+            }
+            let x = self.cursor.x;
+            let y = self.cursor.y;
+            let width = self.left_and_right_margins.end;
+            let room = width.saturating_sub(x).max(1);
+            let (run, after) = rest.split_at(room.min(rest.len()));
+            let pen = self.pen.clone();
+            self.screen_mut().set_cells_ascii(x, y, run, pen, seqno);
+            let end = x + run.len();
+            if end < width {
+                self.cursor.x = end;
+                self.wrap_next = false;
+            } else {
+                // The last cell printed is at the margin, where the cursor stays.
+                self.cursor.x = end - 1;
+                self.wrap_next = self.dec_auto_wrap;
+            }
+            rest = after;
+        }
+    }
+
     fn flush_print(&mut self) {
         if self.print.is_empty() {
             return;
@@ -164,6 +228,14 @@ impl<'a> Performer<'a> {
 
         let seqno = self.seqno;
         let mut p = std::mem::take(&mut self.print);
+        let remapping = (self.shift_out && self.g1_charset == CharSet::DecLineDrawing)
+            || (!self.shift_out && self.g0_charset == CharSet::DecLineDrawing);
+        if !self.insert && !remapping && p.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+            self.print_ascii(&p, seqno);
+            std::mem::swap(&mut self.print, &mut p);
+            self.print.clear();
+            return;
+        }
         let normalized: String;
         let text = if self.config.normalize_output_to_unicode_nfc()
             && is_nfc_quick(p.chars()) != IsNormalized::Yes
@@ -214,36 +286,7 @@ impl<'a> Performer<'a> {
             }
 
             if self.wrap_next {
-                // Since we're implicitly moving the cursor to the next
-                // line, we need to tag the current position as wrapped
-                // so that we can correctly reflow it if the window is
-                // resized.
-                {
-                    let y = self.cursor.y;
-                    let is_conpty = self.state.enable_conpty_quirks;
-                    let screen = self.screen_mut();
-                    let y = screen.phys_row(y);
-
-                    fn makes_sense_to_wrap(s: &str) -> bool {
-                        let len = s.len();
-                        match (len, s.chars().next()) {
-                            (1, Some(c)) => c.is_alphanumeric() || c.is_ascii_punctuation(),
-                            _ => true,
-                        }
-                    }
-
-                    let should_mark_wrapped = !is_conpty
-                        || screen
-                            .line_mut(y)
-                            .visible_cells()
-                            .last()
-                            .map(|cell| makes_sense_to_wrap(cell.str()))
-                            .unwrap_or(false);
-                    if should_mark_wrapped {
-                        screen.line_mut(y).set_last_cell_was_wrapped(true, seqno);
-                    }
-                }
-                self.new_line(true);
+                self.wrap_to_next_line(seqno);
             }
 
             let x = self.cursor.x;
@@ -417,6 +460,15 @@ impl<'a> Performer<'a> {
     }
 
     /// Draw a character to the screen
+    /// Prints `text` as `print` would each of its characters.
+    pub fn print_str(&mut self, text: &str) {
+        if let Some(title) = self.accumulating_title.as_mut() {
+            title.push_str(text);
+        } else {
+            self.print.push_str(text);
+        }
+    }
+
     fn print(&mut self, c: char) {
         // We buffer up the chars to increase the chances of correctly grouping graphemes into cells
         if let Some(title) = self.accumulating_title.as_mut() {
@@ -748,6 +800,7 @@ impl<'a> Performer<'a> {
                 self.dec_ansi_mode = false;
                 self.application_keypad = false;
                 self.bracketed_paste = false;
+                self.synchronized_output = false;
                 self.focus_tracking = false;
                 self.mouse_tracking = false;
                 self.mouse_encoding = MouseEncoding::X10;

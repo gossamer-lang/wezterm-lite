@@ -1475,3 +1475,31 @@ fn a_combining_mark_in_a_later_read_joins_the_character_before_it() {
         "0\u{301}"
     );
 }
+
+#[test]
+fn ascii_runs_mark_their_wrap_and_line_drawing_still_remaps() {
+    let mut term = TestTerm::new(3, 10, 0);
+    term.print("0123456789abc");
+    assert_visible_contents(&term, file!(), line!(), &["0123456789", "abc", ""]);
+    let lines = term.screen().visible_lines();
+    assert!(lines[0].last_cell_was_wrapped());
+    assert!(!lines[1].last_cell_was_wrapped());
+    term.print("\x1b(0qq\x1b(Bq");
+    assert_visible_contents(&term, file!(), line!(), &["0123456789", "abc──q", ""]);
+}
+
+#[test]
+fn synchronized_output_follows_its_mode_and_a_full_reset_ends_it() {
+    let mut term = TestTerm::new(3, 10, 0);
+    assert!(!term.synchronized_output());
+    term.set_mode("?2026", true);
+    assert!(term.synchronized_output());
+    term.set_mode("?2026", false);
+    assert!(!term.synchronized_output());
+    term.set_mode("?2026", true);
+    term.print("\x1bc");
+    assert!(!term.synchronized_output());
+    term.set_mode("?2026", true);
+    term.end_synchronized_output();
+    assert!(!term.synchronized_output());
+}

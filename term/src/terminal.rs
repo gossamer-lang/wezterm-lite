@@ -166,11 +166,36 @@ impl Terminal {
     pub fn advance_bytes<B: AsRef<[u8]>>(&mut self, bytes: B) {
         self.state.increment_seqno();
         {
-            let bytes = bytes.as_ref();
+            let mut rest = bytes.as_ref();
 
             let mut performer = Performer::new(&mut self.state);
 
-            self.parser.parse(bytes, |action| performer.perform(action));
+            let printable = |b: &u8| (0x20..0x7f).contains(b);
+            while !rest.is_empty() {
+                // Printable ASCII between sequences prints as it is, without a
+                // parser action for each character.
+                if self.parser.is_ground() {
+                    let run = rest
+                        .iter()
+                        .position(|b| !printable(b))
+                        .unwrap_or(rest.len());
+                    if run > 0 {
+                        let (text, after) = rest.split_at(run);
+                        performer.print_str(std::str::from_utf8(text).unwrap_or_default());
+                        rest = after;
+                        continue;
+                    }
+                }
+                // The parser takes the rest up to where a printable run may
+                // begin; inside a sequence it takes the run's bytes too.
+                let end = rest[1..]
+                    .iter()
+                    .position(printable)
+                    .map_or(rest.len(), |p| p + 1);
+                let (bytes, after) = rest.split_at(end);
+                self.parser.parse(bytes, |action| performer.perform(action));
+                rest = after;
+            }
         }
         self.trigger_unseen_output_notif();
     }

@@ -423,6 +423,21 @@ impl Screen {
         line.set_cell_grapheme(x, text, width, attr, seqno);
     }
 
+    /// Sets the cells from (`x`, `y`) on to the bytes of `text`, printable
+    /// ASCII, one cell each.
+    pub fn set_cells_ascii(
+        &mut self,
+        x: usize,
+        y: VisibleRowIndex,
+        text: &str,
+        attr: CellAttributes,
+        seqno: SequenceNo,
+    ) {
+        let line_idx = self.phys_row(y);
+        self.line_mut(line_idx)
+            .set_cells_ascii(x, text, attr, seqno);
+    }
+
     pub fn cell_mut(&mut self, x: usize, y: VisibleRowIndex) -> Option<&mut Cell> {
         let line_idx = self.phys_row(y);
         let line = self.lines.get_mut(line_idx)?;

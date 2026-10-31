@@ -308,6 +308,10 @@ pub struct TerminalState {
     /// designated marker characters.
     bracketed_paste: bool,
 
+    /// While set (DECSET 2026), the program is drawing a frame that the
+    /// host should show only once the mode resets.
+    synchronized_output: bool,
+
     /// Movement events enabled
     any_event_mouse: bool,
     focus_tracking: bool,
@@ -473,6 +477,7 @@ impl TerminalState {
             color_map,
             application_keypad: false,
             bracketed_paste: false,
+            synchronized_output: false,
             focus_tracking: false,
             mouse_encoding: MouseEncoding::X10,
             keyboard_encoding: KeyboardEncoding::Xterm,
@@ -798,6 +803,17 @@ impl TerminalState {
     /// Length tracks the screen width, so index is the column.
     pub fn tab_stops_by_column(&self) -> Vec<bool> {
         self.tabs.tabs.clone()
+    }
+
+    /// Returns true while the program draws a synchronized frame (DECSET
+    /// 2026), which the host shows only once the mode resets.
+    pub fn synchronized_output(&self) -> bool {
+        self.synchronized_output
+    }
+
+    /// Ends a synchronized frame the program left open, as when it exits.
+    pub fn end_synchronized_output(&mut self) {
+        self.synchronized_output = false;
     }
 
     /// Returns true if the associated application has enabled
@@ -1630,19 +1646,17 @@ impl TerminalState {
             Mode::SetDecPrivateMode(DecPrivateMode::Code(
                 DecPrivateModeCode::SynchronizedOutput,
             )) => {
-                // This is handled in wezterm's mux
+                self.synchronized_output = true;
             }
             Mode::ResetDecPrivateMode(DecPrivateMode::Code(
                 DecPrivateModeCode::SynchronizedOutput,
             )) => {
-                // This is handled in wezterm's mux
+                self.synchronized_output = false;
             }
             Mode::QueryDecPrivateMode(DecPrivateMode::Code(
                 DecPrivateModeCode::SynchronizedOutput,
             )) => {
-                // This is handled in wezterm's mux; if we get here, then it isn't enabled,
-                // so we always report false
-                self.decqrm_response(mode, true, false);
+                self.decqrm_response(mode, true, self.synchronized_output);
             }
 
             Mode::SetDecPrivateMode(DecPrivateMode::Code(DecPrivateModeCode::SmoothScroll))

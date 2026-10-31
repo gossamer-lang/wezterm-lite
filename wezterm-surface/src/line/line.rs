@@ -792,6 +792,47 @@ impl Line {
         self.set_cell(idx, Cell::new_grapheme_with_width(text, width, attr), seqno);
     }
 
+    /// Sets the cells from `idx` on to the bytes of `text`, printable ASCII,
+    /// one cell each, all in `attr`: `set_cell_grapheme` for each byte.
+    pub fn set_cells_ascii(
+        &mut self,
+        idx: usize,
+        text: &str,
+        attr: CellAttributes,
+        seqno: SequenceNo,
+    ) {
+        if attr.hyperlink().is_some() {
+            self.bits |= LineBits::HAS_HYPERLINK;
+        }
+        if let CellStorage::C(cl) = &mut self.cells {
+            if idx > cl.len() && text.bytes().all(|b| b == b' ') && attr == CellAttributes::blank()
+            {
+                // Blanks beyond the end of the line are already implied.
+                return;
+            }
+            if idx >= cl.len() {
+                while cl.len() < idx {
+                    cl.append_grapheme(" ", 1, CellAttributes::blank());
+                }
+                cl.append_ascii(text, attr);
+                self.invalidate_implicit_hyperlinks(seqno);
+                self.invalidate_zones();
+                self.update_last_change_seqno(seqno);
+                return;
+            }
+        }
+        for (i, b) in text.bytes().enumerate() {
+            let byte = [b];
+            // The bytes are ASCII, so each is a whole character.
+            let cell = std::str::from_utf8(&byte).unwrap_or(" ");
+            self.set_cell(
+                idx + i,
+                Cell::new_grapheme_with_width(cell, 1, attr.clone()),
+                seqno,
+            );
+        }
+    }
+
     pub fn set_cell_clearing_image_placements(
         &mut self,
         idx: usize,

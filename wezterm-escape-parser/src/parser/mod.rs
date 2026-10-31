@@ -92,6 +92,17 @@ impl Parser {
         tmux_parser.advance_bytes(bytes)
     }
 
+    /// Whether the parser is between sequences, with no escape sequence,
+    /// string or partial UTF-8 character in progress, so printable ASCII
+    /// that follows prints as it is.
+    pub fn is_ground(&self) -> bool {
+        #[cfg(feature = "tmux_cc")]
+        if self.state.borrow().tmux_state.is_some() {
+            return false;
+        }
+        self.state_machine.is_ground()
+    }
+
     pub fn parse<F: FnMut(Action)>(&mut self, bytes: &[u8], mut callback: F) {
         #[cfg(feature = "tmux_cc")]
         let is_tmux_mode: bool = self.state.borrow().tmux_state.is_some();

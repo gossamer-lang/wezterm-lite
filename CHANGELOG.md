@@ -10,6 +10,8 @@
 - Replies to the program (device attributes, status reports, mouse reports) are written in full, on the thread that feeds the terminal, before `advance_bytes` returns; a terminal no longer starts a writer thread.
 - A tab over blank cells leaves `\t` in the cell it began on, as xterm and VTE do, so copying a line gives its tabs back.
 - A cell keeps at most 32 codepoints of a grapheme cluster, so a run of combining marks cannot grow one cell without bound.
+- Runs of printable ASCII skip the escape parser and fill their cells in bulk.
+- Synchronized output (DECSET 2026) is tracked: `synchronized_output()` answers whether the program has a frame open, DECRQM reports the mode, and RIS ends it.
 - A combining mark that arrives in a later read than its base character joins that character, where it was dropped.
 - `Screen::with_phys_lines` reads lines in order once the history ring wraps, where it read the wrong lines or panicked.
 - `CellRef::str` and `CellRef::attrs` borrow from the line, not from the `CellRef`, so a caller can keep them while walking the line.

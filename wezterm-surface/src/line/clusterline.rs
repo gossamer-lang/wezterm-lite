@@ -181,6 +181,33 @@ impl ClusteredLine {
         }
     }
 
+    /// Appends `text`, printable ASCII, one cell a byte, all in `attrs`: what
+    /// `append_grapheme` does for each byte, as one extension of the line.
+    pub fn append_ascii(&mut self, text: &str, attrs: CellAttributes) {
+        let mut left = text.len();
+        while left > 0 {
+            let room = match self.clusters.last_mut() {
+                Some(cluster) if cluster.attrs == attrs && cluster.cell_width < u16::MAX => {
+                    let take = left.min(usize::from(u16::MAX - cluster.cell_width));
+                    cluster.cell_width += take as u16;
+                    take
+                }
+                _ => {
+                    let take = left.min(usize::from(u16::MAX));
+                    self.clusters.push(Cluster {
+                        attrs: attrs.clone(),
+                        cell_width: take as u16,
+                    });
+                    take
+                }
+            };
+            left -= room;
+        }
+        self.text.push_str(text);
+        self.last_cell_width = NonZeroU8::new(1);
+        self.len += text.len() as u32;
+    }
+
     pub fn append_grapheme(&mut self, text: &str, cell_width: usize, attrs: CellAttributes) {
         let cell_width = cell_width as u16;
         let new_cluster = match self.clusters.last() {
