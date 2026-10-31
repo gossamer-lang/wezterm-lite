@@ -186,6 +186,7 @@ fn images_over_the_memory_limit_replace_the_oldest() {
 
     term.advance_bytes(sixel(0, 0, 100));
     k9::assert_equal!(image_colors(&term), vec![[0, 255, 0], [0, 0, 255]]);
+    k9::assert_equal!(term.image_memory(), 2 * 8 * 6 * 4);
 }
 
 /// The same image placed again is held once, so it takes no more room.

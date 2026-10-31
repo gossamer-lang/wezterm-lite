@@ -79,9 +79,15 @@ pub(crate) struct ImageBudget {
 }
 
 impl TerminalState {
+    /// The bytes the distinct images on the screens and in the kitty store
+    /// take.
+    pub fn image_memory(&mut self) -> usize {
+        self.held_image_bytes(None)
+    }
+
     /// The bytes of the distinct images the screens and the kitty store
     /// hold, with `adding`.
-    fn held_image_bytes(&mut self, adding: &Arc<ImageData>) -> usize {
+    fn held_image_bytes(&mut self, adding: Option<&Arc<ImageData>>) -> usize {
         self.image_budget
             .placed
             .retain(|p| p.data.strong_count() > 0);
@@ -94,7 +100,7 @@ impl TerminalState {
         let stored = self.kitty_img.stored().cloned();
         placed
             .chain(stored)
-            .chain(std::iter::once(Arc::clone(adding)))
+            .chain(adding.cloned())
             .filter(|image| seen.insert(Arc::as_ptr(image)))
             .map(|image| image.len())
             .sum()
@@ -111,7 +117,7 @@ impl TerminalState {
             limit
         );
         let mut turns = self.image_budget.placed.len();
-        while turns > 0 && self.held_image_bytes(data) > limit {
+        while turns > 0 && self.held_image_bytes(Some(data)) > limit {
             turns -= 1;
             let Some(oldest) = self.image_budget.placed.pop_front() else {
                 break;
@@ -126,10 +132,10 @@ impl TerminalState {
             }
             self.detach_placed_image(&image, &oldest);
         }
-        if self.held_image_bytes(data) > limit {
+        if self.held_image_bytes(Some(data)) > limit {
             self.kitty_img.prune_unreferenced(0, Some(data));
         }
-        let held = self.held_image_bytes(data);
+        let held = self.held_image_bytes(Some(data));
         anyhow::ensure!(
             held <= limit,
             "Ignoring image: images would hold {held} bytes, over the limit of {limit}"
