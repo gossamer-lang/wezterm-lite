@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 - Compact scrollback lines
+
+- A line compressed into the scrollback keeps its text and attribute runs at their exact size.
+- `wezterm-term` no longer enables `wezterm-surface`'s `appdata` feature, so its lines carry no appdata slot.
+- `Line`'s `Debug` output leaves out the appdata slot.
+
 ## 0.1.0
 
 - Initial release: WezTerm's terminal core (`wezterm-term` and the crates under it) as its own workspace, from WezTerm commit e68a8ec.

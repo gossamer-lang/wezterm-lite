@@ -42,7 +42,6 @@ pub enum DoubleClickRange {
 }
 
 #[cfg_attr(feature = "use_serde", derive(Serialize, Deserialize))]
-#[derive(Debug)]
 pub struct Line {
     pub(crate) cells: CellStorage,
     zones: Vec<ZoneRange>,
@@ -51,6 +50,19 @@ pub struct Line {
     #[cfg(feature = "appdata")]
     #[cfg_attr(feature = "use_serde", serde(skip))]
     appdata: Mutex<Option<Weak<dyn Any + Send + Sync>>>,
+}
+
+// The appdata is an embedder's cache handle, not line content, so it is
+// left out.
+impl core::fmt::Debug for Line {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Line")
+            .field("cells", &self.cells)
+            .field("zones", &self.zones)
+            .field("seqno", &self.seqno)
+            .field("bits", &self.bits)
+            .finish()
+    }
 }
 
 impl Clone for Line {

@@ -143,6 +143,10 @@ impl ClusteredLine {
         if let Some(cluster) = last_cluster.take() {
             clusters.push(cluster);
         }
+        // A compressed line sits in the scrollback unchanged, so it keeps no
+        // room to grow.
+        text.shrink_to_fit();
+        clusters.shrink_to_fit();
 
         Self {
             text,
@@ -408,5 +412,17 @@ mod test {
         assert_eq!(core::mem::size_of::<Vec<Cluster>>(), 24);
         assert_eq!(core::mem::size_of::<Option<Box<FixedBitSet>>>(), 8);
         assert_eq!(core::mem::size_of::<Option<NonZeroU8>>(), 1);
+    }
+
+    #[test]
+    fn a_compressed_line_keeps_no_spare_capacity() {
+        let attrs = CellAttributes::default();
+        let mut line = crate::line::Line::from_text("x", &attrs, 1, None);
+        line.compress_for_scrollback();
+        let crate::line::storage::CellStorage::C(c) = &line.cells else {
+            panic!("the line was not compressed");
+        };
+        assert_eq!(c.text.capacity(), c.text.len());
+        assert_eq!(c.clusters.capacity(), c.clusters.len());
     }
 }
