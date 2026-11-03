@@ -1536,6 +1536,43 @@ fn mixed_text_keeps_the_graphemes_that_join_an_ascii_character() {
     );
 }
 
+#[test]
+fn the_uk_charset_prints_a_pound_sign_for_a_hash_in_any_text() {
+    let mut term = TestTerm::new(2, 20, 0);
+    // ESC ( A selects the United Kingdom set; ESC ( B the US one again.
+    term.print("\x1b(Aa#b \u{65e5}#\x1b(B#");
+    let line = &term.screen().visible_lines()[0];
+    assert_eq!(line.as_str().trim_end(), "a£b \u{65e5}£#");
+}
+
+#[test]
+fn text_printed_whole_wraps_as_it_does_printed_a_grapheme_at_a_time() {
+    let text =
+        "ascii 日本語 wörld e\u{301} Ελληνικά текст 😀 한국어 ab界cd 1\u{fe0f}\u{20e3}".repeat(4);
+    let cells = |term: &TestTerm| -> Vec<(String, usize)> {
+        term.screen()
+            .visible_lines()
+            .iter()
+            .flat_map(|line| {
+                line.visible_cells()
+                    .map(|c| (c.str().to_string(), c.width()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    for cols in [7, 11, 13, 80] {
+        let mut whole = TestTerm::new(12, cols, 0);
+        whole.print(&text);
+        let mut pieces = TestTerm::new(12, cols, 0);
+        for g in finl_unicode::grapheme_clusters::Graphemes::new(&text) {
+            pieces.print(g);
+        }
+        assert_eq!(cells(&whole), cells(&pieces), "{} columns", cols);
+        let (a, b) = (whole.cursor_pos(), pieces.cursor_pos());
+        assert_eq!((a.x, a.y), (b.x, b.y), "{} columns", cols);
+    }
+}
+
 fn assert_history_rows(term: &TestTerm, rows: usize) {
     let lines = term.screen().all_lines();
     for (n, line) in lines.iter().take(rows).enumerate() {
@@ -1560,6 +1597,17 @@ fn assert_history_rows(term: &TestTerm, rows: usize) {
     }
 }
 
+// The history's running byte count agrees with one taken row by row.
+fn assert_counted_history_bytes(term: &TestTerm) {
+    let screen = term.screen();
+    let history = screen.scrollback_rows() - screen.physical_rows;
+    let mut counted = 0;
+    screen.with_phys_lines(0..history, |lines| {
+        counted += lines.iter().map(|line| line.heap_bytes()).sum::<usize>();
+    });
+    assert_eq!(screen.history_bytes(), counted);
+}
+
 #[test]
 fn compacted_history_reads_back_whole_and_survives_a_rewrap() {
     let mut term = TestTerm::new(10, 40, 5000);
@@ -1572,9 +1620,11 @@ fn compacted_history_reads_back_whole_and_survives_a_rewrap() {
     }
     term.print(out);
     term.compact_history();
+    assert_counted_history_bytes(&term);
     assert_history_rows(&term, 2990);
     // The read inflated the rows; compacting again stores them compressed.
     term.compact_history();
+    assert_counted_history_bytes(&term);
     assert_history_rows(&term, 2990);
     // A narrower screen rewraps every row, cold ones included, and a wider
     // one joins them back.
@@ -1594,6 +1644,53 @@ fn compacted_history_reads_back_whole_and_survives_a_rewrap() {
     });
     term.compact_history();
     assert_history_rows(&term, 2990);
+}
+
+#[test]
+fn history_a_read_inflated_compresses_again_by_its_blocks_after_an_eviction() {
+    let mut term = TestTerm::new(10, 40, 3000);
+    let mut out = String::new();
+    for n in 0..3000 {
+        out.push_str(&format!(
+            "\x1b[3{}mrow-{n} \x1b]8;;https://e/{n}\x1b\\link\x1b]8;;\x1b\\ 界\x1b[0m\r\n",
+            n % 8
+        ));
+    }
+    term.print(out);
+    term.compact_history();
+    // Rows that leave the history from its oldest end leave its first block
+    // short.
+    let mut more = String::new();
+    for n in 3000..3010 {
+        more.push_str(&format!("row-{n}\r\n"));
+    }
+    term.print(more);
+    let screen = term.screen();
+    let history = screen.scrollback_rows() - screen.physical_rows;
+    screen.with_phys_lines(0..history, |lines| {
+        for line in lines {
+            let _ = line.as_str();
+        }
+    });
+    term.recompress_read_history();
+    assert_counted_history_bytes(&term);
+    let screen = term.screen();
+    let mut rows = Vec::new();
+    screen.with_phys_lines(0..history, |lines| {
+        rows.extend(lines.iter().map(|l| (*l).clone()))
+    });
+    assert!(rows.iter().all(|line| !line.cold_and_inflated()));
+    // Each block's rows are one run, of at most a block's rows.
+    let mut run = 1;
+    for pair in rows.windows(2) {
+        if pair[0].shares_cold_block(&pair[1]) {
+            run += 1;
+            assert!(run <= 64, "{}", run);
+        } else {
+            run = 1;
+        }
+    }
+    assert_eq!(rows[0].as_str().trim_end(), "row-1 link 界");
 }
 
 #[derive(Debug)]
@@ -1711,4 +1808,40 @@ fn a_program_pushes_and_pops_kitty_keyboard_flags() {
     );
     term.advance_bytes("\x1b[<u");
     assert_eq!(term.kitty_keyboard_flags(), None);
+}
+
+#[test]
+fn text_runs_leave_split_characters_and_c1_controls_to_the_parser() {
+    let mut term = TestTerm::new(3, 20, 0);
+    // An é split across two writes prints once, whole.
+    term.print(b"x\xc3");
+    term.print(b"\xa9y");
+    // U+009B written as UTF-8 is CSI: this sets red, then prints "z".
+    term.print("\u{9b}31mz".as_bytes());
+    // A byte that can't begin a character is left out, as the parser has it.
+    term.print(b"\xff!");
+    let line = &term.screen().visible_lines()[0];
+    assert_eq!(line.as_str().trim_end(), "xéyz!");
+    let z = line.visible_cells().find(|c| c.str() == "z").unwrap();
+    assert_eq!(
+        z.attrs().foreground(),
+        wezterm_cell::color::ColorAttribute::PaletteIndex(1)
+    );
+}
+
+#[test]
+fn rows_that_scroll_in_take_only_the_pens_background() {
+    let mut term = TestTerm::new(3, 10, 10);
+    term.print("\x1b[4;31;42mx\r\n\r\n\r\n");
+    let lines = term.screen().visible_lines();
+    let blank = lines[2].visible_cells().next().unwrap();
+    assert_eq!(
+        blank.attrs().background(),
+        wezterm_cell::color::ColorAttribute::PaletteIndex(2)
+    );
+    assert_eq!(
+        blank.attrs().foreground(),
+        wezterm_cell::color::ColorAttribute::Default
+    );
+    assert_eq!(blank.attrs().underline(), wezterm_cell::Underline::None);
 }

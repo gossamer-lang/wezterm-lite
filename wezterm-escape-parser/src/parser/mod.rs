@@ -137,6 +137,22 @@ impl Parser {
         self.state_machine.parse(bytes, &mut perform);
     }
 
+    /// Parses `bytes` until the parser is between sequences again, having
+    /// taken at least one byte, and answers how many it took; text that
+    /// follows is the caller's to print. In tmux control mode it takes them all.
+    pub fn parse_until_ground<F: FnMut(Action)>(&mut self, bytes: &[u8], mut callback: F) -> usize {
+        #[cfg(feature = "tmux_cc")]
+        if self.state.borrow().tmux_state.is_some() {
+            self.parse(bytes, callback);
+            return bytes.len();
+        }
+        let mut perform = Performer {
+            callback: &mut callback,
+            state: &mut self.state.borrow_mut(),
+        };
+        self.state_machine.parse_until_ground(bytes, &mut perform)
+    }
+
     /// A specialized version of the parser that halts after recognizing the
     /// first action from the stream of bytes.  The return value is the action
     /// that was recognized and the length of the byte stream that was fed in

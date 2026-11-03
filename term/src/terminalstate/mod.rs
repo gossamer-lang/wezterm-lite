@@ -641,8 +641,6 @@ impl TerminalState {
         }
     }
 
-    /// Returns a reference to the active screen (either the primary or
-    /// the alternate screen).
     /// Stores the history rows well above the screen compressed, and those a
     /// read inflated since. Cheap when there is nothing new to compress, so an
     /// embedder can call it whenever its terminal is quiet.
@@ -650,6 +648,24 @@ impl TerminalState {
         self.screen.screen.chill();
     }
 
+    /// Does one block of `compact_history`'s work: false once none is left,
+    /// so an embedder can stop between blocks for output that arrives.
+    pub fn compact_history_step(&mut self) -> bool {
+        if self.screen.screen.chill_step() {
+            return true;
+        }
+        self.screen.screen.rechill();
+        false
+    }
+
+    /// Stores the history rows a read inflated compressed again, leaving rows
+    /// not yet compressed to `compact_history`.
+    pub fn recompress_read_history(&mut self) {
+        self.screen.screen.rechill();
+    }
+
+    /// Returns a reference to the active screen (either the primary or
+    /// the alternate screen).
     pub fn screen(&self) -> &Screen {
         &self.screen
     }
@@ -1120,7 +1136,11 @@ impl TerminalState {
 
     fn scroll_up(&mut self, num_rows: usize) {
         let seqno = self.seqno;
-        let blank_attr = self.pen.clone_sgr_only();
+        // Rows that scroll in take the pen's background, as xterm fills them;
+        // nothing else of the pen shows on a blank cell.
+        let mut blank_attr = CellAttributes::blank();
+        blank_attr.set_background(self.pen.background());
+        blank_attr.set_reverse(self.pen.reverse());
         let top_and_bottom_margins = self.top_and_bottom_margins.clone();
         let left_and_right_margins = self.left_and_right_margins.clone();
         let bidi_mode = self.get_bidi_mode();

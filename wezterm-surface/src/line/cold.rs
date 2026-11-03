@@ -18,20 +18,31 @@ pub(crate) struct ColdBlock {
     data: Box<[u8]>,
     attrs: Box<[CellAttributes]>,
     rows: usize,
+    /// The heap memory of the compressed rows and their attributes, which
+    /// never change once the block is made.
+    stored: usize,
     inflated: OnceLock<Box<[ClusteredLine]>>,
 }
 
 impl ColdBlock {
     pub(crate) fn new(lines: &[&ClusteredLine]) -> Self {
-        let mut raw = Vec::new();
+        let mut raw = Vec::with_capacity(lines.iter().map(|line| line.encoded_size()).sum());
         let mut attrs = Vec::new();
         for line in lines {
             line.encode(&mut raw, &mut attrs);
         }
+        let data = lz4_flex::compress_prepend_size(&raw).into_boxed_slice();
+        let stored = data.len()
+            + attrs
+                .iter()
+                .map(|a| core::mem::size_of::<CellAttributes>() + a.heap_bytes())
+                .sum::<usize>()
+            + core::mem::size_of::<Self>();
         Self {
-            data: lz4_flex::compress_prepend_size(&raw).into_boxed_slice(),
+            data,
             attrs: attrs.into_boxed_slice(),
             rows: lines.len(),
+            stored,
             inflated: OnceLock::new(),
         }
     }
@@ -42,18 +53,10 @@ impl ColdBlock {
     }
 
     /// Heap memory the block holds for each of its rows: the compressed rows
-    /// and their attributes, and the rows a read inflated.
+    /// and their attributes. The rows a read inflates are left out, as the
+    /// next compaction frees them, so a row's count never changes.
     pub(crate) fn heap_bytes_per_row(&self) -> usize {
-        let inflated = self
-            .inflated
-            .get()
-            .map_or(0, |lines| lines.iter().map(ClusteredLine::heap_bytes).sum());
-        let attrs: usize = self
-            .attrs
-            .iter()
-            .map(|a| core::mem::size_of::<CellAttributes>() + a.heap_bytes())
-            .sum();
-        (self.data.len() + attrs + inflated + core::mem::size_of::<Self>()) / self.rows.max(1)
+        self.stored / self.rows.max(1)
     }
 
     pub(crate) fn lines(&self) -> &[ClusteredLine] {

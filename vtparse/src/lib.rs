@@ -522,27 +522,146 @@ impl VTParser {
         }
     }
 
+    fn clear(&mut self) {
+        self.num_intermediates = 0;
+        self.ignored_excess_intermediates = false;
+        self.osc.num_params = 0;
+        self.osc.full = false;
+        self.num_params = 0;
+        self.params_full = false;
+        self.current_param.take();
+        #[cfg(any(feature = "std", feature = "alloc"))]
+        {
+            self.apc_data.clear();
+            self.apc_data.shrink_to_fit();
+            self.osc.buffer.clear();
+            self.osc.buffer.shrink_to_fit();
+        }
+    }
+
+    #[inline]
+    fn param(&mut self, param: u8) {
+        if self.params_full {
+            return;
+        }
+
+        self.promote_intermediates_to_params();
+
+        match param {
+            b'0'..=b'9' => match self.current_param.take() {
+                Some(CsiParam::Integer(i)) => {
+                    self.current_param.replace(CsiParam::Integer(
+                        i.saturating_mul(10).saturating_add((param - b'0') as i64),
+                    ));
+                }
+                Some(_) => unreachable!(),
+                None => {
+                    self.current_param
+                        .replace(CsiParam::Integer((param - b'0') as i64));
+                }
+            },
+            p => {
+                self.finish_param();
+
+                if self.num_params + 1 > MAX_PARAMS {
+                    self.params_full = true;
+                } else {
+                    self.params[self.num_params] = CsiParam::P(p);
+                    self.num_params += 1;
+                }
+            }
+        }
+    }
+
+    // A whole control sequence at the start of `bytes`, `ESC [`, at most one
+    // private marker (`<` to `?`), parameter bytes and a final byte, which the
+    // state table would walk a byte and a few actions at a time: it clears,
+    // collects, takes parameters and dispatches as the table does, in one
+    // pass. Answers the bytes it took, or `None` for anything else (a
+    // sequence with intermediates or controls inside, or one the bytes end
+    // before), which the table takes.
+    fn csi_sequence(&mut self, bytes: &[u8], actor: &mut dyn VTActor) -> Option<usize> {
+        if bytes.get(1) != Some(&b'[') {
+            return None;
+        }
+        let mut at = 2;
+        let marker = match *bytes.get(at)? {
+            b @ 0x3c..=0x3f => {
+                at += 1;
+                Some(b)
+            }
+            // Straight after `[`, a colon makes the sequence one to ignore.
+            b':' => return None,
+            _ => None,
+        };
+        let params = at;
+        self.clear();
+        if let Some(marker) = marker {
+            self.intermediates[0] = marker;
+            self.num_intermediates = 1;
+        }
+        self.promote_intermediates_to_params();
+        // As the Param action does for each byte, with the number being built
+        // kept here rather than in `current_param`. A sequence this pass
+        // leaves (cut short, or holding another byte) the state table walks
+        // again from its start, clearing what was stored here.
+        let mut value: i64 = 0;
+        let mut digits = false;
+        let last = loop {
+            let b = *bytes.get(at)?;
+            match b {
+                b'0'..=b'9' => {
+                    value = value.saturating_mul(10).saturating_add(i64::from(b - b'0'));
+                    digits = true;
+                }
+                b':' | b';' => {
+                    if self.params_full {
+                        at += 1;
+                        continue;
+                    }
+                    if digits && self.num_params < MAX_PARAMS {
+                        self.params[self.num_params] = CsiParam::Integer(value);
+                        self.num_params += 1;
+                    }
+                    value = 0;
+                    digits = false;
+                    if self.num_params + 1 > MAX_PARAMS {
+                        self.params_full = true;
+                    } else {
+                        self.params[self.num_params] = CsiParam::P(b);
+                        self.num_params += 1;
+                    }
+                }
+                0x40..=0x7e => break b,
+                _ => return None,
+            }
+            at += 1;
+        };
+        if digits && !self.params_full && self.num_params < MAX_PARAMS {
+            self.params[self.num_params] = CsiParam::Integer(value);
+            self.num_params += 1;
+        }
+        self.promote_intermediates_to_params();
+        actor.csi_dispatch(
+            &self.params[0..self.num_params],
+            self.ignored_excess_intermediates,
+            last,
+        );
+        self.utf8_return_state = if at > params || marker.is_some() {
+            State::CsiParam
+        } else {
+            State::CsiEntry
+        };
+        self.state = State::Ground;
+        Some(at + 1)
+    }
+
     fn action(&mut self, action: Action, param: u8, actor: &mut dyn VTActor) {
         match action {
             Action::None | Action::Ignore => {}
             Action::Print => actor.print(param as char),
             Action::Execute => actor.execute_c0_or_c1(param),
-            Action::Clear => {
-                self.num_intermediates = 0;
-                self.ignored_excess_intermediates = false;
-                self.osc.num_params = 0;
-                self.osc.full = false;
-                self.num_params = 0;
-                self.params_full = false;
-                self.current_param.take();
-                #[cfg(any(feature = "std", feature = "alloc"))]
-                {
-                    self.apc_data.clear();
-                    self.apc_data.shrink_to_fit();
-                    self.osc.buffer.clear();
-                    self.osc.buffer.shrink_to_fit();
-                }
-            }
+            Action::Clear => self.clear(),
             Action::Collect => {
                 if self.num_intermediates < MAX_INTERMEDIATES {
                     self.intermediates[self.num_intermediates] = param;
@@ -551,38 +670,7 @@ impl VTParser {
                     self.ignored_excess_intermediates = true;
                 }
             }
-            Action::Param => {
-                if self.params_full {
-                    return;
-                }
-
-                self.promote_intermediates_to_params();
-
-                match param {
-                    b'0'..=b'9' => match self.current_param.take() {
-                        Some(CsiParam::Integer(i)) => {
-                            self.current_param.replace(CsiParam::Integer(
-                                i.saturating_mul(10).saturating_add((param - b'0') as i64),
-                            ));
-                        }
-                        Some(_) => unreachable!(),
-                        None => {
-                            self.current_param
-                                .replace(CsiParam::Integer((param - b'0') as i64));
-                        }
-                    },
-                    p => {
-                        self.finish_param();
-
-                        if self.num_params + 1 > MAX_PARAMS {
-                            self.params_full = true;
-                        } else {
-                            self.params[self.num_params] = CsiParam::P(p);
-                            self.num_params += 1;
-                        }
-                    }
-                }
-            }
+            Action::Param => self.param(param),
             Action::Hook => {
                 self.finish_param();
                 actor.dcs_hook(
@@ -750,9 +838,37 @@ impl VTParser {
     /// Parse a sequence of bytes.  The sequence need not be complete.
     /// This may result in some number of calls to the methods on the
     /// provided `actor`.
+    /// Parses `bytes` until the state machine is back in the ground state,
+    /// having taken at least one byte, so text that follows can be printed
+    /// without it. Answers how many bytes it took.
+    pub fn parse_until_ground(&mut self, bytes: &[u8], actor: &mut dyn VTActor) -> usize {
+        let mut i = 0;
+        while i < bytes.len() {
+            if self.state == State::Ground && bytes[i] == 0x1b {
+                if let Some(taken) = self.csi_sequence(&bytes[i..], actor) {
+                    return i + taken;
+                }
+            }
+            self.parse_byte(bytes[i], actor);
+            i += 1;
+            if self.state == State::Ground {
+                return i;
+            }
+        }
+        i
+    }
+
     pub fn parse(&mut self, bytes: &[u8], actor: &mut dyn VTActor) {
-        for b in bytes {
-            self.parse_byte(*b, actor);
+        let mut i = 0;
+        while i < bytes.len() {
+            if self.state == State::Ground && bytes[i] == 0x1b {
+                if let Some(taken) = self.csi_sequence(&bytes[i..], actor) {
+                    i += taken;
+                    continue;
+                }
+            }
+            self.parse_byte(bytes[i], actor);
+            i += 1;
         }
     }
 }
@@ -761,6 +877,59 @@ impl VTParser {
 mod test {
     use super::*;
     use k9::assert_equal as assert_eq;
+
+    // The actions the state table alone yields for `bytes`, one byte at a time.
+    fn table_walk(bytes: &[u8]) -> Vec<VTAction> {
+        let mut parser = VTParser::new();
+        let mut actor = CollectingVTActor::default();
+        for &b in bytes {
+            parser.parse_byte(b, &mut actor);
+        }
+        actor.into_vec()
+    }
+
+    #[test]
+    fn a_whole_control_sequence_parses_as_the_state_table_walks_it() {
+        let many: String = (0..200).map(|n| format!("{n};")).collect();
+        let cases: Vec<Vec<u8>> = vec![
+            b"\x1b[m".to_vec(),
+            b"\x1b[0;38;5;68;48;2;1;2;3mtext".to_vec(),
+            b"\x1b[38:2::10:20:30m".to_vec(),
+            b"\x1b[:1m\x1b[?25l\x1b[>4;1m\x1b[=5u\x1b[<u".to_vec(),
+            b"\x1b[1;2;3 q\x1b[ q".to_vec(),
+            b"\x1b[1;2\x07;3m\x1b[1\x1b[2m".to_vec(),
+            b"\x1b[12;99999999999999999999999H".to_vec(),
+            format!("\x1b[{many}m").into_bytes(),
+            b"\x1b[1;2?m\x1b[?1;?2h".to_vec(),
+            b"\x1b]0;title\x07\x1b[2J\x1bP1$q\x1b\\\x1b[3".to_vec(),
+            "\u{1b}[31mé\u{1b}[0m\u{1b}[\u{9b}1m".as_bytes().to_vec(),
+        ];
+        for case in &cases {
+            assert_eq!(
+                parse_as_vec(case),
+                table_walk(case),
+                "{:?}",
+                String::from_utf8_lossy(case)
+            );
+            // Split anywhere, the sequence parses the same.
+            for split in 1..case.len() {
+                let mut parser = VTParser::new();
+                let mut actor = CollectingVTActor::default();
+                parser.parse(&case[..split], &mut actor);
+                parser.parse(&case[split..], &mut actor);
+                assert_eq!(actor.into_vec(), table_walk(case), "split at {split}");
+            }
+            let mut parser = VTParser::new();
+            let mut actor = CollectingVTActor::default();
+            let mut rest = &case[..];
+            while !rest.is_empty() {
+                let taken = parser.parse_until_ground(rest, &mut actor);
+                assert!(taken > 0);
+                rest = &rest[taken..];
+            }
+            assert_eq!(actor.into_vec(), table_walk(case));
+        }
+    }
 
     fn parse_as_vec(bytes: &[u8]) -> Vec<VTAction> {
         let mut parser = VTParser::new();

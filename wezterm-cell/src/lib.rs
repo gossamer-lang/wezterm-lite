@@ -2,7 +2,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use crate::color::{ColorAttribute, PaletteIndex};
+use crate::color::{ColorAttribute, PaletteIndex, SrgbaTuple};
 #[cfg(feature = "use_image")]
 use crate::image::ImageCell;
 use alloc::sync::Arc;
@@ -461,6 +461,62 @@ impl CellAttributes {
         res.set_overline(false);
         res.set_strikethrough(false);
         res
+    }
+
+    /// Appends these attributes to `out` as bytes, unless they hold a
+    /// hyperlink or an image, answering whether it wrote them; compressed
+    /// history keeps attributes so, beside its text.
+    pub fn encode(&self, out: &mut Vec<u8>) -> bool {
+        let fat = match &self.fat {
+            Some(fat) if fat.hyperlink.is_some() => return false,
+            #[cfg(feature = "use_image")]
+            Some(fat) if !fat.image.is_empty() => return false,
+            fat => fat,
+        };
+        out.extend_from_slice(&self.attributes.to_le_bytes());
+        for color in [self.foreground, self.background] {
+            match color {
+                SmallColor::Default => out.push(0),
+                SmallColor::PaletteIndex(index) => out.extend_from_slice(&[1, index]),
+            }
+        }
+        match fat {
+            None => out.push(0),
+            Some(fat) => {
+                out.push(1);
+                for color in [fat.underline_color, fat.foreground, fat.background] {
+                    encode_color(color, out);
+                }
+            }
+        }
+        true
+    }
+
+    /// Reads attributes `encode` wrote from the front of `input`.
+    pub fn decode(input: &mut &[u8]) -> Self {
+        let attributes = u32::from_le_bytes(take_bytes(input));
+        let mut small = || match take_byte(input) {
+            1 => SmallColor::PaletteIndex(take_byte(input)),
+            _ => SmallColor::Default,
+        };
+        let foreground = small();
+        let background = small();
+        let fat = (take_byte(input) == 1).then(|| {
+            Box::new(FatAttributes {
+                hyperlink: None,
+                #[cfg(feature = "use_image")]
+                image: Vec::new(),
+                underline_color: decode_color(input),
+                foreground: decode_color(input),
+                background: decode_color(input),
+            })
+        });
+        Self {
+            attributes,
+            foreground,
+            background,
+            fat,
+        }
     }
 
     /// Heap memory these attributes hold beyond their inline size.
@@ -952,6 +1008,76 @@ pub fn unicode_column_width(s: &str, version: Option<&UnicodeVersion>) -> usize 
 /// The terminal emulator can then pass the unicode version through to
 /// the Cell that is used to hold a grapheme, and that per-Cell version
 /// can then be used to calculate width.
+fn take_byte(input: &mut &[u8]) -> u8 {
+    take_bytes::<1>(input)[0]
+}
+
+// The next `N` bytes of `input`, zero past its end.
+fn take_bytes<const N: usize>(input: &mut &[u8]) -> [u8; N] {
+    let mut bytes = [0; N];
+    let n = N.min(input.len());
+    bytes[..n].copy_from_slice(&input[..n]);
+    *input = &input[n..];
+    bytes
+}
+
+fn encode_color(color: ColorAttribute, out: &mut Vec<u8>) {
+    let rgba = |out: &mut Vec<u8>, c: SrgbaTuple| {
+        for part in [c.0, c.1, c.2, c.3] {
+            out.extend_from_slice(&part.to_le_bytes());
+        }
+    };
+    match color {
+        ColorAttribute::Default => out.push(0),
+        ColorAttribute::PaletteIndex(index) => out.extend_from_slice(&[1, index]),
+        ColorAttribute::TrueColorWithDefaultFallback(c) => {
+            out.push(2);
+            rgba(out, c);
+        }
+        ColorAttribute::TrueColorWithPaletteFallback(c, index) => {
+            out.push(3);
+            rgba(out, c);
+            out.push(index);
+        }
+    }
+}
+
+fn decode_color(input: &mut &[u8]) -> ColorAttribute {
+    let rgba = |input: &mut &[u8]| {
+        let mut part = || f32::from_le_bytes(take_bytes(input));
+        SrgbaTuple(part(), part(), part(), part())
+    };
+    match take_byte(input) {
+        1 => ColorAttribute::PaletteIndex(take_byte(input)),
+        2 => ColorAttribute::TrueColorWithDefaultFallback(rgba(input)),
+        3 => {
+            let c = rgba(input);
+            ColorAttribute::TrueColorWithPaletteFallback(c, take_byte(input))
+        }
+        _ => ColorAttribute::Default,
+    }
+}
+
+/// Columns a grapheme of the single character `c` takes when `c` presents
+/// as text by default, as `char_column_width` gives for such a character.
+#[inline]
+pub fn text_char_column_width(c: char, version: &UnicodeVersion) -> usize {
+    version.wcwidth(c).min(2)
+}
+
+/// Columns a grapheme of the single character `c` takes; the same as
+/// `grapheme_column_width` gives for it, for a caller that has decoded it.
+#[inline]
+pub fn char_column_width(c: char, version: Option<&UnicodeVersion>) -> usize {
+    let version = version.unwrap_or(&LATEST_UNICODE_VERSION);
+    // A single character carries no variation selector, so its own
+    // presentation and width decide.
+    if version.version >= 14 && Presentation::for_char(c) == Presentation::Emoji {
+        return 2;
+    }
+    version.wcwidth(c).min(2)
+}
+
 pub fn grapheme_column_width(s: &str, version: Option<&UnicodeVersion>) -> usize {
     let version = version.unwrap_or(&LATEST_UNICODE_VERSION);
 
@@ -970,8 +1096,11 @@ pub fn grapheme_column_width(s: &str, version: Option<&UnicodeVersion>) -> usize
         return version.wcwidth(s.as_bytes()[0] as char);
     }
 
-    // Slow path: `s.chars()` will dominate and pull up the minimum
-    // runtime to ~20ns
+    let mut chars = s.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        return char_column_width(c, Some(version));
+    }
+
     if version.version >= 14 {
         // Lookup the grapheme to see if the presentation of
         // the grapheme forces the width. We can bypass
@@ -1013,7 +1142,56 @@ pub enum AttributeChange {
 
 #[cfg(test)]
 mod test {
+    // The tests print, so they link std whether or not the crate does.
+    extern crate std;
     use super::*;
+    use std::{eprintln, vec};
+
+    #[test]
+    fn attributes_read_back_as_they_were_written_and_links_are_left_out() {
+        use crate::color::{ColorAttribute, SrgbaTuple};
+        let mut plain = CellAttributes::default();
+        plain.set_intensity(Intensity::Bold).set_italic(true);
+        plain.set_foreground(ColorAttribute::PaletteIndex(196));
+        let mut true_color = plain.clone();
+        true_color.set_background(ColorAttribute::TrueColorWithDefaultFallback(SrgbaTuple(
+            0.25, 0.5, 0.75, 1.0,
+        )));
+        true_color.set_underline_color(ColorAttribute::TrueColorWithPaletteFallback(
+            SrgbaTuple(0.1, 0.2, 0.3, 1.0),
+            7,
+        ));
+        let mut out = Vec::new();
+        for attrs in [CellAttributes::default(), plain, true_color] {
+            out.clear();
+            assert!(attrs.encode(&mut out));
+            let mut input = out.as_slice();
+            assert_eq!(CellAttributes::decode(&mut input), attrs);
+            assert!(input.is_empty());
+        }
+        let mut linked = CellAttributes::default();
+        linked.set_hyperlink(Some(Arc::new(Hyperlink::new("https://e/"))));
+        out.clear();
+        assert!(!linked.encode(&mut out));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_grapheme_is_as_wide_as_its_presentation_and_characters_make_it() {
+        for (g, width) in [
+            ("A", 1),
+            ("é", 1),
+            ("e\u{301}", 1),
+            ("界", 2),
+            ("⌚", 2),
+            ("⌚\u{fe0e}", 1),
+            ("❤", 1),
+            ("❤\u{fe0f}", 2),
+            ("\u{200b}", 0),
+        ] {
+            assert_eq!(grapheme_column_width(g, None), width, "{g:?}");
+        }
+    }
 
     #[test]
     fn teeny_string() {

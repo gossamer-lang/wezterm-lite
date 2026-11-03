@@ -14,8 +14,11 @@ impl Presentation {
     /// by the explicit presentation if specified
     /// by a variation selector
     pub fn for_grapheme(s: &str) -> (Self, Option<Self>) {
-        if let Some((a, b)) = VARIATION_MAP.get(s) {
-            return (*a, Some(*b));
+        // Every sequence the map holds ends in a variation selector.
+        if s.ends_with(['\u{fe0e}', '\u{fe0f}']) {
+            if let Some((a, b)) = VARIATION_MAP.get(s) {
+                return (*a, Some(*b));
+            }
         }
         let mut presentation = Self::Text;
         for c in s.chars() {

@@ -8,6 +8,11 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use wezterm_surface::SequenceNo;
 
+// History rows this near the screen stay uncompressed, as programs and
+// views reach them most.
+const HOT_ROWS: usize = 256;
+const COLD_BLOCK_ROWS: usize = 64;
+
 /// Holds the model of a screen.  This can either be the primary screen
 /// which includes lines of scrollback text, or the alternate screen
 /// which holds no scrollback.  The intent is to have one instance of
@@ -438,6 +443,22 @@ impl Screen {
         line.set_cell_grapheme(x, text, width, attr, seqno);
     }
 
+    /// Sets the cells from (`x`, `y`) on to the graphemes of `run`, each with
+    /// its cell width.
+    pub fn set_cells_graphemes(
+        &mut self,
+        x: usize,
+        y: VisibleRowIndex,
+        text: &str,
+        run: &[(usize, usize)],
+        attr: CellAttributes,
+        seqno: SequenceNo,
+    ) {
+        let line_idx = self.phys_row(y);
+        let line = self.line_mut(line_idx);
+        line.set_cells_graphemes(x, text, run, attr, seqno);
+    }
+
     /// Sets the cells from (`x`, `y`) on to the bytes of `text`, printable
     /// ASCII, one cell each.
     pub fn set_cells_ascii(
@@ -852,41 +873,50 @@ impl Screen {
     /// compressed, in blocks of `COLD_BLOCK_ROWS`, and recompresses blocks a
     /// read inflated; the rows nearer the screen stay as they are.
     pub fn chill(&mut self) {
-        const HOT_ROWS: usize = 256;
-        const COLD_BLOCK_ROWS: usize = 64;
-        let history = self.history_rows();
-        let mut changed = false;
-        while self.cold_rows + HOT_ROWS + COLD_BLOCK_ROWS <= history {
-            let start = self.cold_rows;
-            let mut block: Vec<&mut Line> = self
-                .lines
-                .range_mut(start..start + COLD_BLOCK_ROWS)
-                .collect();
-            Line::chill(&mut block);
-            self.cold_rows += COLD_BLOCK_ROWS;
-            changed = true;
+        while self.chill_step() {}
+        self.rechill();
+    }
+
+    /// Stores the next block of history rows that `chill` would compress;
+    /// false when there is none, so a caller can spread the work out.
+    pub fn chill_step(&mut self) -> bool {
+        if self.cold_rows + HOT_ROWS + COLD_BLOCK_ROWS > self.history_rows() {
+            return false;
         }
-        // Blocks a read inflated are stored compressed again; with no read
-        // since the last look there are none.
+        self.chill_rows(self.cold_rows..self.cold_rows + COLD_BLOCK_ROWS);
+        self.cold_rows += COLD_BLOCK_ROWS;
+        true
+    }
+
+    /// Recompresses the blocks a read inflated; with no read since the last
+    /// look there are none.
+    pub fn rechill(&mut self) {
         let inflations = wezterm_surface::line::cold_inflations();
-        if inflations != self.inflations_seen {
-            self.inflations_seen = inflations;
-            let mut start = 0;
-            while start + COLD_BLOCK_ROWS <= self.cold_rows {
-                if self.lines[start].cold_and_inflated() {
-                    let mut block: Vec<&mut Line> = self
-                        .lines
-                        .range_mut(start..start + COLD_BLOCK_ROWS)
-                        .collect();
-                    Line::chill(&mut block);
-                    changed = true;
-                }
-                start += COLD_BLOCK_ROWS;
+        if inflations == self.inflations_seen {
+            return;
+        }
+        self.inflations_seen = inflations;
+        // Evicting the oldest rows leaves the first block short, so a block's
+        // rows are found by the block they share rather than by position.
+        let cold = self.cold_rows.min(self.lines.len());
+        let mut start = 0;
+        while start < cold {
+            let end = (start + 1..cold)
+                .find(|&row| !self.lines[row].shares_cold_block(&self.lines[start]))
+                .unwrap_or(cold);
+            if self.lines[start].cold_and_inflated() {
+                self.chill_rows(start..end);
             }
+            start = end;
         }
-        if changed {
-            self.recount_history_bytes();
-        }
+    }
+
+    fn chill_rows(&mut self, rows: std::ops::Range<usize>) {
+        let before: usize = self.lines.range(rows.clone()).map(Line::heap_bytes).sum();
+        let mut block: Vec<&mut Line> = self.lines.range_mut(rows.clone()).collect();
+        Line::chill(&mut block);
+        let after: usize = self.lines.range(rows).map(Line::heap_bytes).sum();
+        self.history_bytes = self.history_bytes - before + after;
     }
 
     /// ```text

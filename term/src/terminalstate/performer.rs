@@ -14,7 +14,8 @@ use std::ops::{Deref, DerefMut};
 use unicode_normalization::{is_nfc_quick, IsNormalized, UnicodeNormalization};
 use wezterm_bidi::ParagraphDirectionHint;
 use wezterm_cell::{
-    grapheme_column_width, is_white_space_grapheme, Cell, CellAttributes, SemanticType,
+    char_column_width, grapheme_column_width, is_white_space_grapheme, text_char_column_width,
+    Cell, CellAttributes, SemanticType,
 };
 use wezterm_escape_parser::csi::{
     CharacterPath, EraseInDisplay, Keyboard, KittyKeyboardFlags, KittyKeyboardMode,
@@ -32,6 +33,9 @@ use wezterm_escape_parser::{
 pub(crate) struct Performer<'a> {
     pub state: &'a mut TerminalState,
     print: String,
+    /// The byte length and cell width of each grapheme in the run being
+    /// placed, kept to spare an allocation per print.
+    run: Vec<(usize, usize)>,
 }
 
 impl<'a> Deref for Performer<'a> {
@@ -58,7 +62,75 @@ impl<'a> Drop for Performer<'a> {
 /// marks) is cut here, so a cell's text stays bounded whatever a program sends.
 const MAX_GRAPHEME_CHARS: usize = 32;
 
+// Characters whose Grapheme_Cluster_Break neither joins them to a neighbor
+// of this kind nor joins such a neighbor to them: two in a row always have a
+// grapheme boundary between them. Hangul syllables join only conjoining
+// jamo, which are not of this kind.
+const STANDING_ALONE: [(u32, u32); 8] = [
+    (0x20, 0x7e),
+    (0xa0, 0x2ff),
+    (0x370, 0x482),
+    (0x48a, 0x52f),
+    (0x3041, 0x3096),
+    (0x30a1, 0x30ff),
+    (0x4e00, 0x9fff),
+    (0xac00, 0xd7a3),
+];
+
+// `STANDING_ALONE` as a bit a character, for the 16-bit characters it holds.
+static STANDING_ALONE_BITS: [u64; 1024] = {
+    let mut bits = [0u64; 1024];
+    let mut range = 0;
+    while range < STANDING_ALONE.len() {
+        let (first, last) = STANDING_ALONE[range];
+        let mut c = first;
+        while c <= last {
+            bits[(c >> 6) as usize] |= 1 << (c & 63);
+            c += 1;
+        }
+        range += 1;
+    }
+    bits
+};
+
+fn stands_alone(c: char) -> bool {
+    let c = c as u32;
+    c < 0x10000 && STANDING_ALONE_BITS[(c >> 6) as usize] >> (c & 63) & 1 == 1
+}
+
+// The grapheme `text` starts with, which must start at a grapheme boundary,
+// and its character when it has only one. `ahead` carries whether the next
+// character stands alone, when this call found out, to the call for it.
+fn first_grapheme<'t>(text: &'t str, ahead: &mut Option<bool>) -> (&'t str, Option<char>) {
+    let mut chars = text.chars();
+    let Some(c) = chars.next() else {
+        return (text, None);
+    };
+    let alone = ahead.take().unwrap_or_else(|| stands_alone(c));
+    let single = &text[..c.len_utf8()];
+    match chars.next() {
+        None => (single, Some(c)),
+        Some(next) if alone && stands_alone(next) => {
+            *ahead = Some(true);
+            (single, Some(c))
+        }
+        Some(_) => match Graphemes::new(text).next() {
+            Some(g) if g.len() == single.len() => (g, Some(c)),
+            Some(g) => (g, None),
+            None => (text, None),
+        },
+    }
+}
+
+fn printable_ascii(b: u8) -> bool {
+    (0x20..0x7f).contains(&b)
+}
+
 fn bounded_grapheme(g: &str) -> &str {
+    // Each character takes a byte at least.
+    if g.len() <= MAX_GRAPHEME_CHARS {
+        return g;
+    }
     match g.char_indices().nth(MAX_GRAPHEME_CHARS) {
         Some((end, _)) => &g[..end],
         None => g,
@@ -70,10 +142,21 @@ impl<'a> Performer<'a> {
         Self {
             state,
             print: String::new(),
+            run: Vec::new(),
         }
     }
 
     /// Apply character set related remapping to the input glyph if required
+    // Whether the charset in use maps some characters to others.
+    fn charset_remaps(&self) -> bool {
+        let charset = if self.shift_out {
+            self.g1_charset
+        } else {
+            self.g0_charset
+        };
+        matches!(charset, CharSet::DecLineDrawing | CharSet::Uk)
+    }
+
     fn remap_grapheme<'b>(&self, g: &'b str) -> &'b str {
         if (self.shift_out && self.g1_charset == CharSet::DecLineDrawing)
             || (!self.shift_out && self.g0_charset == CharSet::DecLineDrawing)
@@ -228,46 +311,34 @@ impl<'a> Performer<'a> {
 
         let seqno = self.seqno;
         let mut p = std::mem::take(&mut self.print);
-        let remapping = (self.shift_out && self.g1_charset == CharSet::DecLineDrawing)
-            || (!self.shift_out && self.g0_charset == CharSet::DecLineDrawing);
-        if self.insert || remapping {
-            self.print_graphemes(&p, seqno);
+        // Printable ASCII alone is a narrow cell a byte, with no character
+        // that a neighbor could join.
+        if !self.insert && self.ascii_prints_plainly() && p.bytes().all(printable_ascii) {
+            self.print_ascii(&p, seqno);
         } else {
-            // Two adjacent printable ASCII characters are always separate
-            // graphemes, so the inside of an ASCII run prints a byte a cell.
-            // The run's first and last characters go with the text around
-            // them, which a prepended or combining character may join.
-            let bytes = p.as_bytes();
-            let mut pending = 0;
-            let mut i = 0;
-            while i < bytes.len() {
-                if !(0x20..0x7f).contains(&bytes[i]) {
-                    i += 1;
-                    continue;
-                }
-                let end = bytes[i..]
-                    .iter()
-                    .position(|b| !(0x20..0x7f).contains(b))
-                    .map_or(bytes.len(), |n| i + n);
-                let lo = if i > 0 { i + 1 } else { i };
-                let hi = if end < bytes.len() { end - 1 } else { end };
-                if lo < hi {
-                    self.print_graphemes(&p[pending..lo], seqno);
-                    self.print_ascii(&p[lo..hi], seqno);
-                    pending = hi;
-                }
-                i = end;
-            }
-            self.print_graphemes(&p[pending..], seqno);
+            self.print_graphemes(&p, seqno);
         }
         std::mem::swap(&mut self.print, &mut p);
         self.print.clear();
+    }
+
+    // Printable ASCII maps to itself, a cell each, in the current charset
+    // and widths.
+    fn ascii_prints_plainly(&self) -> bool {
+        !self.charset_remaps()
+            && self
+                .unicode_version
+                .cell_widths
+                .as_ref()
+                .is_none_or(|widths| (0x20..0x7f).all(|c| !widths.contains_key(&c)))
     }
 
     fn print_graphemes(&mut self, text: &str, seqno: wezterm_surface::SequenceNo) {
         if text.is_empty() {
             return;
         }
+        let plain_ascii = self.ascii_prints_plainly();
+        let remaps = self.charset_remaps();
         let normalized: String;
         let text = if self.config.normalize_output_to_unicode_nfc()
             && is_nfc_quick(text.chars()) != IsNormalized::Yes
@@ -278,14 +349,103 @@ impl<'a> Performer<'a> {
             text
         };
 
-        for (n, g) in Graphemes::new(text).enumerate() {
-            let g = self.remap_grapheme(bounded_grapheme(g));
+        // Graphemes that land on the cursor's row before its margin go to the
+        // line together, as the span of `text` they cover; the others go one
+        // at a time.
+        let mut run_at = (0, 0);
+        let mut span = 0..0;
+        let mut at = 0;
+        let mut ahead = None;
+        while at < text.len() {
+            // Printable ASCII followed by more of it is a cell a byte.
+            if plain_ascii && !self.insert && !self.wrap_next {
+                let bytes = &text.as_bytes()[at..];
+                let room = self
+                    .left_and_right_margins
+                    .end
+                    .saturating_sub(self.cursor.x + 1);
+                let n = bytes
+                    .windows(2)
+                    .take(room)
+                    .take_while(|pair| printable_ascii(pair[0]) && printable_ascii(pair[1]))
+                    .count();
+                if n > 0 {
+                    ahead = None;
+                    if span.end != at {
+                        self.print_run(&text[span.clone()], run_at, seqno);
+                    }
+                    if self.run.is_empty() {
+                        run_at = (self.cursor.x, self.cursor.y);
+                        span = at..at;
+                    }
+                    self.run.extend(std::iter::repeat_n((1, 1), n));
+                    at += n;
+                    span.end = at;
+                    self.cursor.x += n;
+                    continue;
+                }
+            }
+            // A character standing alone before another is a grapheme by
+            // itself; a stretch of them joins the run here.
+            if !remaps && !self.insert && !self.wrap_next {
+                let end = self.left_and_right_margins.end;
+                let mut chars = text[at..].chars().peekable();
+                let mut took = 0;
+                let mut alone = None;
+                while let (Some(c), Some(&next)) = (chars.next(), chars.peek()) {
+                    if !alone.unwrap_or_else(|| stands_alone(c)) {
+                        break;
+                    }
+                    let next_alone = stands_alone(next);
+                    if !next_alone {
+                        break;
+                    }
+                    alone = Some(next_alone);
+                    // No character standing alone presents as an emoji.
+                    let width = text_char_column_width(c, &self.unicode_version);
+                    if width == 0 || self.cursor.x + took + width >= end {
+                        break;
+                    }
+                    if self.run.is_empty() || span.end != at {
+                        self.print_run(&text[span.clone()], run_at, seqno);
+                        run_at = (self.cursor.x + took, self.cursor.y);
+                        span = at..at;
+                    }
+                    self.run.push((c.len_utf8(), width));
+                    at += c.len_utf8();
+                    span.end = at;
+                    took += width;
+                }
+                if took > 0 {
+                    ahead = None;
+                    self.cursor.x += took;
+                    continue;
+                }
+            }
+            let (whole, single) = first_grapheme(&text[at..], &mut ahead);
+            let start = at;
+            at += whole.len();
+            let bounded = if single.is_some() {
+                whole
+            } else {
+                bounded_grapheme(whole)
+            };
+            let g = if remaps {
+                self.remap_grapheme(bounded)
+            } else {
+                bounded
+            };
 
-            let mut print_width = grapheme_column_width(g, Some(&self.unicode_version));
+            let mut print_width = match single {
+                Some(c) if std::ptr::eq(g, whole) => {
+                    char_column_width(c, Some(&self.unicode_version))
+                }
+                _ => grapheme_column_width(g, Some(&self.unicode_version)),
+            };
             // Output arrives in pieces, so a combining mark can come after its
             // base character was already printed; it joins that character.
             if print_width == 0
-                && n == 0
+                && start == 0
                 && !is_white_space_grapheme(g)
                 && self.extend_previous_cell(g, seqno)
             {
@@ -316,6 +476,26 @@ impl<'a> Performer<'a> {
                     continue;
                 }
             }
+
+            // Only a grapheme printed as it arrived is its own text in `text`.
+            if !self.insert
+                && !self.wrap_next
+                && self.cursor.x + print_width < self.left_and_right_margins.end
+                && std::ptr::eq(g, whole)
+            {
+                if span.end != start {
+                    self.print_run(&text[span.clone()], run_at, seqno);
+                }
+                if self.run.is_empty() {
+                    run_at = (self.cursor.x, self.cursor.y);
+                    span = start..start;
+                }
+                self.run.push((g.len(), print_width));
+                span.end = at;
+                self.cursor.x += print_width;
+                continue;
+            }
+            self.print_run(&text[span.clone()], run_at, seqno);
 
             if self.wrap_next {
                 self.wrap_to_next_line(seqno);
@@ -357,6 +537,26 @@ impl<'a> Performer<'a> {
                 self.wrap_next = self.dec_auto_wrap;
             }
         }
+        self.print_run(&text[span], run_at, seqno);
+    }
+
+    // Places the run, the graphemes of `text`, from `at` on in the pen, and
+    // empties it.
+    fn print_run(
+        &mut self,
+        text: &str,
+        (x, y): (usize, VisibleRowIndex),
+        seqno: wezterm_surface::SequenceNo,
+    ) {
+        if self.run.is_empty() {
+            return;
+        }
+        let run = std::mem::take(&mut self.run);
+        let pen = self.pen.clone();
+        self.screen_mut()
+            .set_cells_graphemes(x, y, text, &run, pen, seqno);
+        self.run = run;
+        self.run.clear();
     }
 
     /// ConPTY, at the time of writing, does something horrible to rewrite
@@ -1247,5 +1447,61 @@ fn selection_to_selection(sel: Selection) -> ClipboardSelection {
         // also use the same fallback configuration as NONE,
         // if/when we add it
         _ => ClipboardSelection::Clipboard,
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn characters_standing_alone_are_a_grapheme_each_beside_one_another() {
+        let neighbors: Vec<char> = STANDING_ALONE
+            .iter()
+            .flat_map(|&(first, last)| [first, (first + last) / 2, last])
+            .filter_map(char::from_u32)
+            .collect();
+        for c in STANDING_ALONE
+            .iter()
+            .flat_map(|&(first, last)| first..=last)
+            .filter_map(char::from_u32)
+        {
+            assert!(stands_alone(c), "{:?}", c);
+            let version = wezterm_cell::LATEST_UNICODE_VERSION;
+            assert_eq!(
+                text_char_column_width(c, &version),
+                char_column_width(c, Some(&version)),
+                "{:?}",
+                c
+            );
+            for &n in &neighbors {
+                for pair in [format!("{c}{n}"), format!("{n}{c}")] {
+                    assert_eq!(Graphemes::new(&pair).count(), 2, "{:?}", pair);
+                }
+            }
+        }
+        for c in [
+            '\u{301}', '\u{483}', '\u{200d}', '\u{fe0f}', '\u{3099}', '\u{1100}', '😀',
+        ] {
+            assert!(!stands_alone(c), "{:?}", c);
+        }
+    }
+
+    #[test]
+    fn a_grapheme_ends_where_the_segmenter_ends_it() {
+        let text = "héllo e\u{301} 日本語 Ελληνικά текст й\u{308} 한국어 \u{1100}\u{1161} 😀\u{fe0f}a 👍🏽 🇯🇵🇫🇷 x";
+        let mut ours = Vec::new();
+        let mut rest = text;
+        let mut ahead = None;
+        while !rest.is_empty() {
+            let (g, single) = first_grapheme(rest, &mut ahead);
+            assert_eq!(
+                single.map(String::from).as_deref(),
+                Some(g).filter(|g| g.chars().count() == 1)
+            );
+            ours.push(g);
+            rest = &rest[g.len()..];
+        }
+        assert_eq!(ours, Graphemes::new(text).collect::<Vec<_>>());
     }
 }

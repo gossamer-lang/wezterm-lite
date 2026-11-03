@@ -201,6 +201,16 @@ impl ClusteredLine {
             })
     }
 
+    /// About the bytes `encode` writes for this line: its text and a few for
+    /// each count, wide cell and run.
+    pub(crate) fn encoded_size(&self) -> usize {
+        let wide = self
+            .is_double_wide
+            .as_ref()
+            .map_or(0, |bits| bits.count_ones(..));
+        self.text.len() + 16 + 4 * wide + 12 * self.clusters.len()
+    }
+
     /// Appends this line to a cold block: its text, wide cells and runs, each
     /// run naming its attributes by their place in `attrs`.
     pub(crate) fn encode(&self, out: &mut Vec<u8>, attrs: &mut Vec<CellAttributes>) {
@@ -220,7 +230,15 @@ impl ClusteredLine {
         put(out, self.clusters.len());
         for cluster in &self.clusters {
             put(out, usize::from(cluster.cell_width));
-            // Runs repeat recent attributes; an older one is stored again.
+            // Attributes go in the bytes compressed with the text; those
+            // holding a hyperlink or an image go to `attrs`, which runs
+            // repeating a recent one share.
+            let tag = out.len();
+            out.push(0);
+            if cluster.attrs.encode(out) {
+                continue;
+            }
+            out[tag] = 1;
             let recent = attrs.len().saturating_sub(16);
             let at = match attrs[recent..].iter().position(|a| *a == cluster.attrs) {
                 Some(i) => recent + i,
@@ -254,7 +272,12 @@ impl ClusteredLine {
         let mut clusters = Vec::with_capacity(n);
         for _ in 0..n {
             let cell_width = take(input) as u16;
-            let attrs = attrs[take(input)].clone();
+            let (&tag, rest) = input.split_first().unwrap_or((&0, &[]));
+            *input = rest;
+            let attrs = match tag {
+                0 => CellAttributes::decode(input),
+                _ => attrs[take(input)].clone(),
+            };
             clusters.push(Cluster { cell_width, attrs });
         }
         Self {
@@ -353,6 +376,56 @@ impl ClusteredLine {
         }
         self.last_cell_width = NonZeroU8::new(cell_width as u8);
         self.len += cell_width as u32;
+    }
+
+    /// Appends the graphemes of `run`, each with its cell width, all in
+    /// `attrs`: what `append_grapheme` does for each, as one extension.
+    /// Appends the graphemes of `text`, whose byte lengths and widths `run`
+    /// gives in order, all in `attrs`.
+    pub fn append_graphemes(&mut self, text: &str, run: &[(usize, usize)], attrs: CellAttributes) {
+        let total: usize = run.iter().map(|(_, w)| w).sum();
+        let extends = self.clusters.last().is_some_and(|cluster| {
+            cluster.attrs == attrs
+                && usize::from(cluster.cell_width) + total <= usize::from(u16::MAX)
+        });
+        if extends {
+            if let Some(cluster) = self.clusters.last_mut() {
+                cluster.cell_width += total as u16;
+            }
+        } else if total <= usize::from(u16::MAX) {
+            self.clusters.push(Cluster {
+                attrs: attrs.clone(),
+                cell_width: total as u16,
+            });
+        } else {
+            let mut rest = text;
+            for &(len, w) in run {
+                let (g, after) = rest.split_at(len);
+                rest = after;
+                self.append_grapheme(g, w, attrs.clone());
+            }
+            return;
+        }
+        self.text.push_str(text);
+        let first = self.len as usize;
+        if run.iter().any(|&(_, w)| w > 1) {
+            let end = first + total;
+            let bitset = self
+                .is_double_wide
+                .get_or_insert_with(|| Box::new(FixedBitSet::with_capacity(end)));
+            bitset.grow(end);
+            let mut index = first;
+            for &(_, w) in run {
+                if w > 1 {
+                    bitset.set(index, true);
+                }
+                index += w;
+            }
+        }
+        if let Some((_, w)) = run.last() {
+            self.last_cell_width = NonZeroU8::new(*w as u8);
+        }
+        self.len += total as u32;
     }
 
     pub fn append(&mut self, cell: Cell) {

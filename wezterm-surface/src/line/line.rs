@@ -203,14 +203,9 @@ impl Line {
         seqno: SequenceNo,
         blank_attr: CellAttributes,
     ) {
-        {
-            let cells = self.coerce_vec_storage();
-            for c in cells.iter_mut() {
-                *c = Cell::blank_with_attrs(blank_attr.clone());
-            }
-            cells.resize_with(width, || Cell::blank_with_attrs(blank_attr.clone()));
-            cells.shrink_to_fit();
-        }
+        // The old cells are dropped, not converted.
+        let cells = vec![Cell::blank_with_attrs(blank_attr); width];
+        self.cells = CellStorage::V(VecStorage::new(cells));
         self.update_last_change_seqno(seqno);
         self.invalidate_zones();
         self.bits = LineBits::NONE;
@@ -807,6 +802,42 @@ impl Line {
         self.set_cell(idx, Cell::new_grapheme_with_width(text, width, attr), seqno);
     }
 
+    /// Sets the cells from `idx` on to the graphemes of `run`, each with its
+    /// cell width, all in `attr`: `set_cell_grapheme` for each in turn.
+    pub fn set_cells_graphemes(
+        &mut self,
+        idx: usize,
+        text: &str,
+        run: &[(usize, usize)],
+        attr: CellAttributes,
+        seqno: SequenceNo,
+    ) {
+        if attr.hyperlink().is_some() {
+            self.bits |= LineBits::HAS_HYPERLINK;
+        }
+        self.warm();
+        if let CellStorage::C(cl) = &mut self.cells {
+            if idx >= cl.len() {
+                while cl.len() < idx {
+                    cl.append_grapheme(" ", 1, CellAttributes::blank());
+                }
+                cl.append_graphemes(text, run, attr);
+                self.invalidate_implicit_hyperlinks(seqno);
+                self.invalidate_zones();
+                self.update_last_change_seqno(seqno);
+                return;
+            }
+        }
+        let mut at = idx;
+        let mut rest = text;
+        for &(len, w) in run {
+            let (g, after) = rest.split_at(len);
+            rest = after;
+            self.set_cell_grapheme(at, g, w, attr.clone(), seqno);
+            at += w;
+        }
+    }
+
     /// Sets the cells from `idx` on to the bytes of `text`, printable ASCII,
     /// one cell each, all in `attr`: `set_cell_grapheme` for each byte.
     pub fn set_cells_ascii(
@@ -1143,6 +1174,14 @@ impl Line {
     /// Whether this row's cold block has been read since it was stored.
     pub fn cold_and_inflated(&self) -> bool {
         matches!(&self.cells, CellStorage::Z(row) if row.block.inflated())
+    }
+
+    /// Whether this line and `other` are rows of one compressed block.
+    pub fn shares_cold_block(&self, other: &Line) -> bool {
+        match (&self.cells, &other.cells) {
+            (CellStorage::Z(a), CellStorage::Z(b)) => alloc::sync::Arc::ptr_eq(&a.block, &b.block),
+            _ => false,
+        }
     }
 
     /// Memory the line holds, its own size included: an estimate that bounds

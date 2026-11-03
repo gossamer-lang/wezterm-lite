@@ -125,6 +125,55 @@ impl Default for TerminalSize {
     }
 }
 
+/// The text `bytes` begins with that prints as it is: valid UTF-8 up to the
+/// first control. A C1 control written as UTF-8 is a control to the parser,
+/// and an invalid or unfinished character is the parser's to replace or
+/// complete, so the run stops before either.
+fn text_run(bytes: &[u8]) -> &str {
+    let end = run_end(bytes);
+    if end == 0 {
+        return "";
+    }
+    let candidate = &bytes[..end];
+    match std::str::from_utf8(candidate) {
+        Ok(text) => text,
+        Err(error) => std::str::from_utf8(&candidate[..error.valid_up_to()]).unwrap_or_default(),
+    }
+}
+
+// Where the first C0 control, DEL or C1 control in UTF-8 (0xC2 followed by
+// 0x80..=0x9F) starts, or the length of `bytes` without one.
+fn run_end(bytes: &[u8]) -> usize {
+    const ONES: u64 = u64::from_le_bytes([1; 8]);
+    const HIGHS: u64 = u64::from_le_bytes([0x80; 8]);
+    // The high bit of each byte of `word` below `n` (0x20 at most) is set.
+    // The borrow out of such a byte can set the bits of bytes after it too,
+    // so each byte flagged is checked.
+    let below = |word: u64, n: u8| word.wrapping_sub(ONES * u64::from(n)) & !word & HIGHS;
+    let holds = |word: u64, b: u8| below(word ^ (ONES * u64::from(b)), 1);
+    let stops = |i: usize| {
+        let b = bytes[i];
+        b < 0x20
+            || b == 0x7f
+            || (b == 0xc2 && bytes.get(i + 1).is_some_and(|n| (0x80..=0x9f).contains(n)))
+    };
+    let (words, _) = bytes.as_chunks::<8>();
+    for (n, word) in words.iter().enumerate() {
+        let word = u64::from_le_bytes(*word);
+        let mut flagged = below(word, 0x20) | holds(word, 0x7f) | holds(word, 0xc2);
+        while flagged != 0 {
+            let i = n * 8 + flagged.trailing_zeros() as usize / 8;
+            if stops(i) {
+                return i;
+            }
+            flagged &= flagged - 1;
+        }
+    }
+    (words.len() * 8..bytes.len())
+        .find(|&i| stops(i))
+        .unwrap_or(bytes.len())
+}
+
 impl Terminal {
     /// Construct a new Terminal.
     /// `physical_rows` and `physical_cols` describe the dimensions
@@ -170,31 +219,23 @@ impl Terminal {
 
             let mut performer = Performer::new(&mut self.state);
 
-            let printable = |b: &u8| (0x20..0x7f).contains(b);
             while !rest.is_empty() {
-                // Printable ASCII between sequences prints as it is, without a
-                // parser action for each character.
+                // Text between sequences prints as it is, without a parser
+                // action for each character.
                 if self.parser.is_ground() {
-                    let run = rest
-                        .iter()
-                        .position(|b| !printable(b))
-                        .unwrap_or(rest.len());
-                    if run > 0 {
-                        let (text, after) = rest.split_at(run);
-                        performer.print_str(std::str::from_utf8(text).unwrap_or_default());
-                        rest = after;
+                    let text = text_run(rest);
+                    if !text.is_empty() {
+                        performer.print_str(text);
+                        rest = &rest[text.len()..];
                         continue;
                     }
                 }
-                // The parser takes the rest up to where a printable run may
-                // begin; inside a sequence it takes the run's bytes too.
-                let end = rest[1..]
-                    .iter()
-                    .position(printable)
-                    .map_or(rest.len(), |p| p + 1);
-                let (bytes, after) = rest.split_at(end);
-                self.parser.parse(bytes, |action| performer.perform(action));
-                rest = after;
+                // The parser takes a sequence or control whole, up to where
+                // it is between sequences again.
+                let taken = self
+                    .parser
+                    .parse_until_ground(rest, |action| performer.perform(action));
+                rest = &rest[taken..];
             }
         }
         self.trigger_unseen_output_notif();
@@ -209,5 +250,44 @@ impl Terminal {
             }
         }
         self.trigger_unseen_output_notif();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_end;
+
+    #[test]
+    fn a_run_ends_at_the_first_control_wherever_it_falls_in_a_word() {
+        let stops = |bytes: &[u8]| {
+            (0..bytes.len())
+                .find(|&i| {
+                    let b = bytes[i];
+                    b < 0x20
+                        || b == 0x7f
+                        || (b == 0xc2 && matches!(bytes.get(i + 1), Some(0x80..=0x9f)))
+                })
+                .unwrap_or(bytes.len())
+        };
+        let marks: [&[u8]; 9] = [
+            b"\x00",
+            b"\x1b",
+            b"\x1f",
+            b"\x7f",
+            b"\xc2\x9b",
+            b"\xc2\x80",
+            b"\xc2\xa9",
+            b"\xc3\xa9",
+            b"\xc2",
+        ];
+        for len in 0..24 {
+            for at in 0..=len {
+                for mark in marks {
+                    let mut bytes = vec![b'a'; len];
+                    bytes.splice(at..at, mark.iter().copied());
+                    assert_eq!(run_end(&bytes), stops(&bytes), "{:?}", bytes);
+                }
+            }
+        }
     }
 }

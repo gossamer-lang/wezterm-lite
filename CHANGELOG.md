@@ -5,6 +5,9 @@
 - `Terminal::compact_history` stores history rows well above the screen compressed, in blocks of 64 rows: about a third of the memory for text and colored output. A row read later inflates its block until the next compaction.
 - A scrollback can be bounded by bytes as well as rows (`TerminalConfiguration::scrollback_bytes`); past it the oldest rows go first. `Screen::history_bytes` reports the memory the history holds.
 - A line that mixes ASCII with other text prints its ASCII runs through the fast path.
+- Output parses faster: a control sequence parses in one pass, text between sequences skips the state table, and characters that are a grapheme each (Latin, Greek, Cyrillic, kana, CJK, Hangul) are placed a run at a time without segmenting them. Colored text parses nearly twice as fast as in 0.1.1 and mixed Unicode about two and a half times as fast.
+- Compressed history keeps its attributes compressed with its text, so colored history takes about half the memory it did. `compact_history_step` does the work a block at a time and `recompress_read_history` recompresses only the rows a read inflated.
+- A row that scrolls in takes only the pen's background and reverse video, as in xterm, not its other attributes.
 - `TerminalState::kitty_keyboard_flags` reports the kitty keyboard protocol flags a program pushed, and `input_types` re-exports the key event types that encode under them.
 
 ## 0.1.1 - Compact scrollback lines
