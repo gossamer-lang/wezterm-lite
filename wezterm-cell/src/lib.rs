@@ -463,6 +463,13 @@ impl CellAttributes {
         res
     }
 
+    /// Heap memory these attributes hold beyond their inline size.
+    pub fn heap_bytes(&self) -> usize {
+        self.fat
+            .as_ref()
+            .map_or(0, |_| mem::size_of::<FatAttributes>())
+    }
+
     pub fn hyperlink(&self) -> Option<&Arc<Hyperlink>> {
         self.fat.as_ref().and_then(|fat| fat.hyperlink.as_ref())
     }

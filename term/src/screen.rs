@@ -29,6 +29,15 @@ pub struct Screen {
     /// PhysRowIndex and StableRowIndex.
     stable_row_index_offset: usize,
 
+    /// How many of the oldest history rows are stored compressed.
+    cold_rows: usize,
+
+    /// The memory the history rows hold, by `Line::heap_bytes`.
+    history_bytes: usize,
+
+    /// Cold block inflations already seen, by `cold_inflations`.
+    inflations_seen: u64,
+
     /// config so we can access Maximum number of lines of scrollback
     config: Arc<dyn TerminalConfiguration>,
 
@@ -84,6 +93,9 @@ impl Screen {
             physical_rows,
             physical_cols,
             stable_row_index_offset: 0,
+            cold_rows: 0,
+            history_bytes: 0,
+            inflations_seen: 0,
             dpi: size.dpi,
             keyboard_stack: vec![],
             saved_cursor: None,
@@ -174,6 +186,7 @@ impl Screen {
             }
         }
         self.lines = rewrapped;
+        self.cold_rows = 0;
 
         // If we resized narrower and generated additional lines,
         // we may need to scroll the lines to make room.  However,
@@ -317,6 +330,8 @@ impl Screen {
 
         self.physical_rows = physical_rows;
         self.physical_cols = physical_cols;
+        self.recount_history_bytes();
+        self.bound_history_bytes();
         CursorPosition {
             x: cursor_x,
             y: new_cursor_y,
@@ -705,6 +720,9 @@ impl Screen {
         if scroll_region.start == 0 {
             for y in self.phys_range(&(0..num_rows as VisibleRowIndex)) {
                 self.line_mut(y).compress_for_scrollback();
+                if scrollback_ok {
+                    self.history_bytes += self.lines[y].heap_bytes();
+                }
             }
         }
 
@@ -721,6 +739,9 @@ impl Screen {
         let (to_remove, to_add) = {
             for _ in 0..to_move {
                 let mut line = self.lines.remove(remove_idx).unwrap();
+                if remove_idx == 0 && scrollback_ok {
+                    self.history_bytes = self.history_bytes.saturating_sub(line.heap_bytes());
+                }
                 let line = if default_blank == blank_attr {
                     Line::new(seqno)
                 } else {
@@ -742,11 +763,22 @@ impl Screen {
 
         // Perform the removal
         for _ in 0..to_remove {
-            self.lines.remove(remove_idx);
+            let line = self.lines.remove(remove_idx);
+            if remove_idx == 0 && scrollback_ok {
+                if let Some(line) = line {
+                    self.history_bytes = self.history_bytes.saturating_sub(line.heap_bytes());
+                }
+            }
         }
 
         if remove_idx == 0 && scrollback_ok {
             self.stable_row_index_offset += lines_removed;
+        }
+        if remove_idx == 0 {
+            self.cold_rows = self.cold_rows.saturating_sub(lines_removed);
+        }
+        if scrollback_ok {
+            self.bound_history_bytes();
         }
 
         for _ in 0..to_add {
@@ -783,6 +815,77 @@ impl Screen {
             if self.allow_scrollback {
                 self.stable_row_index_offset += 1;
             }
+        }
+        self.cold_rows = 0;
+        self.history_bytes = 0;
+    }
+
+    /// The memory the history rows hold, by the estimate of `Line::heap_bytes`.
+    pub fn history_bytes(&self) -> usize {
+        self.history_bytes
+    }
+
+    fn history_rows(&self) -> usize {
+        self.lines.len().saturating_sub(self.physical_rows)
+    }
+
+    // Counts the history's memory afresh, after rows were rebuilt in place.
+    fn recount_history_bytes(&mut self) {
+        let rows = self.history_rows();
+        self.history_bytes = self.lines.range(..rows).map(Line::heap_bytes).sum();
+    }
+
+    // Past the scrollback's byte bound the oldest rows go first, as they do
+    // past its row count.
+    fn bound_history_bytes(&mut self) {
+        let limit = self.config.scrollback_bytes();
+        while self.history_bytes > limit && self.history_rows() > 0 {
+            if let Some(line) = self.lines.pop_front() {
+                self.history_bytes = self.history_bytes.saturating_sub(line.heap_bytes());
+                self.stable_row_index_offset += 1;
+                self.cold_rows = self.cold_rows.saturating_sub(1);
+            }
+        }
+    }
+
+    /// Stores the history rows more than `HOT_ROWS` above the screen
+    /// compressed, in blocks of `COLD_BLOCK_ROWS`, and recompresses blocks a
+    /// read inflated; the rows nearer the screen stay as they are.
+    pub fn chill(&mut self) {
+        const HOT_ROWS: usize = 256;
+        const COLD_BLOCK_ROWS: usize = 64;
+        let history = self.history_rows();
+        let mut changed = false;
+        while self.cold_rows + HOT_ROWS + COLD_BLOCK_ROWS <= history {
+            let start = self.cold_rows;
+            let mut block: Vec<&mut Line> = self
+                .lines
+                .range_mut(start..start + COLD_BLOCK_ROWS)
+                .collect();
+            Line::chill(&mut block);
+            self.cold_rows += COLD_BLOCK_ROWS;
+            changed = true;
+        }
+        // Blocks a read inflated are stored compressed again; with no read
+        // since the last look there are none.
+        let inflations = wezterm_surface::line::cold_inflations();
+        if inflations != self.inflations_seen {
+            self.inflations_seen = inflations;
+            let mut start = 0;
+            while start + COLD_BLOCK_ROWS <= self.cold_rows {
+                if self.lines[start].cold_and_inflated() {
+                    let mut block: Vec<&mut Line> = self
+                        .lines
+                        .range_mut(start..start + COLD_BLOCK_ROWS)
+                        .collect();
+                    Line::chill(&mut block);
+                    changed = true;
+                }
+                start += COLD_BLOCK_ROWS;
+            }
+        }
+        if changed {
+            self.recount_history_bytes();
         }
     }
 

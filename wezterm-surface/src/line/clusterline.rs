@@ -77,6 +77,28 @@ where
     wide_indices.serialize(serializer)
 }
 
+fn put(out: &mut Vec<u8>, mut n: usize) {
+    while n >= 0x80 {
+        out.push((n as u8) | 0x80);
+        n >>= 7;
+    }
+    out.push(n as u8);
+}
+
+fn take(input: &mut &[u8]) -> usize {
+    let mut n = 0;
+    let mut shift = 0;
+    while let Some((&b, rest)) = input.split_first() {
+        *input = rest;
+        n |= usize::from(b & 0x7f) << shift;
+        if b < 0x80 {
+            break;
+        }
+        shift += 7;
+    }
+    n
+}
+
 impl ClusteredLine {
     pub fn new() -> Self {
         Self {
@@ -163,6 +185,85 @@ impl ClusteredLine {
 
     pub fn len(&self) -> usize {
         self.len as usize
+    }
+
+    /// Heap memory the line holds.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.text.capacity()
+            + self.clusters.capacity() * core::mem::size_of::<Cluster>()
+            + self
+                .clusters
+                .iter()
+                .map(|c| c.attrs.heap_bytes())
+                .sum::<usize>()
+            + self.is_double_wide.as_ref().map_or(0, |bits| {
+                bits.len() / 8 + core::mem::size_of::<FixedBitSet>()
+            })
+    }
+
+    /// Appends this line to a cold block: its text, wide cells and runs, each
+    /// run naming its attributes by their place in `attrs`.
+    pub(crate) fn encode(&self, out: &mut Vec<u8>, attrs: &mut Vec<CellAttributes>) {
+        put(out, self.text.len());
+        out.extend_from_slice(self.text.as_bytes());
+        put(out, self.len as usize);
+        out.push(self.last_cell_width.map_or(0, NonZeroU8::get));
+        match &self.is_double_wide {
+            Some(bits) => {
+                put(out, bits.count_ones(..));
+                for i in bits.ones() {
+                    put(out, i);
+                }
+            }
+            None => put(out, 0),
+        }
+        put(out, self.clusters.len());
+        for cluster in &self.clusters {
+            put(out, usize::from(cluster.cell_width));
+            // Runs repeat recent attributes; an older one is stored again.
+            let recent = attrs.len().saturating_sub(16);
+            let at = match attrs[recent..].iter().position(|a| *a == cluster.attrs) {
+                Some(i) => recent + i,
+                None => {
+                    attrs.push(cluster.attrs.clone());
+                    attrs.len() - 1
+                }
+            };
+            put(out, at);
+        }
+    }
+
+    /// Reads back a line `encode` wrote.
+    pub(crate) fn decode(input: &mut &[u8], attrs: &[CellAttributes]) -> Self {
+        let text_len = take(input);
+        let (text, rest) = input.split_at(text_len);
+        *input = rest;
+        let text = String::from_utf8_lossy(text).into_owned();
+        let len = take(input) as u32;
+        let (&last, rest) = input.split_first().unwrap_or((&0, &[]));
+        *input = rest;
+        let wide = take(input);
+        let is_double_wide = (wide > 0).then(|| {
+            let mut bits = FixedBitSet::with_capacity(len as usize + 1);
+            for _ in 0..wide {
+                bits.set(take(input), true);
+            }
+            Box::new(bits)
+        });
+        let n = take(input);
+        let mut clusters = Vec::with_capacity(n);
+        for _ in 0..n {
+            let cell_width = take(input) as u16;
+            let attrs = attrs[take(input)].clone();
+            clusters.push(Cluster { cell_width, attrs });
+        }
+        Self {
+            text,
+            is_double_wide,
+            clusters,
+            len,
+            last_cell_width: NonZeroU8::new(last),
+        }
     }
 
     fn is_double_wide(&self, cell_index: usize) -> bool {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 - Compressed history and a byte bound
+
+- `Terminal::compact_history` stores history rows well above the screen compressed, in blocks of 64 rows: about a third of the memory for text and colored output. A row read later inflates its block until the next compaction.
+- A scrollback can be bounded by bytes as well as rows (`TerminalConfiguration::scrollback_bytes`); past it the oldest rows go first. `Screen::history_bytes` reports the memory the history holds.
+- A line that mixes ASCII with other text prints its ASCII runs through the fast path.
+
 ## 0.1.1 - Compact scrollback lines
 
 - A line compressed into the scrollback keeps its text and attribute runs at their exact size.

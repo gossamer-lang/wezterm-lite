@@ -2,6 +2,7 @@ use crate::cellcluster::CellCluster;
 use crate::hyperlink::Rule;
 use crate::line::cellref::CellRef;
 use crate::line::clusterline::ClusteredLine;
+use crate::line::cold::{ColdBlock, ColdRow};
 use crate::line::linebits::LineBits;
 use crate::line::storage::{CellStorage, VisibleCellIter};
 use crate::line::vecstorage::{VecStorage, VecStorageIter};
@@ -618,7 +619,7 @@ impl Line {
         // Re-compute the physical lines that comprise this logical line
         for phys in logical_line.iter_mut() {
             let wrapped = phys.last_cell_was_wrapped();
-            let is_cluster = matches!(&phys.cells, CellStorage::C(_));
+            let is_cluster = matches!(&phys.cells, CellStorage::C(_) | CellStorage::Z(_));
             let len = phys.len();
             let remainder = logical.split_off(len, seq);
             **phys = logical;
@@ -650,6 +651,7 @@ impl Line {
                 Cow::Owned(s)
             }
             CellStorage::C(cl) => Cow::Borrowed(&cl.text),
+            CellStorage::Z(row) => Cow::Borrowed(&row.line().text),
         }
     }
 
@@ -781,6 +783,7 @@ impl Line {
             self.bits |= LineBits::HAS_HYPERLINK;
         }
 
+        self.warm();
         if let CellStorage::C(cl) = &mut self.cells {
             if idx > cl.len() && text == " " && attr == CellAttributes::blank() {
                 // Appending blank beyond end of line; is already
@@ -816,6 +819,7 @@ impl Line {
         if attr.hyperlink().is_some() {
             self.bits |= LineBits::HAS_HYPERLINK;
         }
+        self.warm();
         if let CellStorage::C(cl) = &mut self.cells {
             if idx > cl.len() && text.bytes().all(|b| b == b' ') && attr == CellAttributes::blank()
             {
@@ -875,6 +879,7 @@ impl Line {
             self.bits |= LineBits::HAS_HYPERLINK;
         }
 
+        self.warm();
         if let CellStorage::C(cl) = &mut self.cells {
             if idx > cl.len() && cell == Cell::blank() {
                 // Appending blank beyond end of line; is already
@@ -1029,6 +1034,7 @@ impl Line {
     }
 
     pub fn prune_trailing_blanks(&mut self, seqno: SequenceNo) {
+        self.warm();
         if let CellStorage::C(cl) = &mut self.cells {
             if cl.prune_trailing_blanks() {
                 self.update_last_change_seqno(seqno);
@@ -1070,6 +1076,7 @@ impl Line {
         match &self.cells {
             CellStorage::V(cells) => cells.len(),
             CellStorage::C(cl) => cl.len(),
+            CellStorage::Z(row) => row.line().len(),
         }
     }
 
@@ -1089,6 +1096,7 @@ impl Line {
                 skip_width: 0,
             }),
             CellStorage::C(cl) => VisibleCellIter::C(cl.iter()),
+            CellStorage::Z(row) => VisibleCellIter::C(row.line().iter()),
         }
     }
 
@@ -1105,6 +1113,7 @@ impl Line {
         let cells = match &self.cells {
             CellStorage::V(_) => return,
             CellStorage::C(cl) => cl.to_cell_vec(),
+            CellStorage::Z(row) => row.line().to_cell_vec(),
         };
         // log::info!("make_cells\n{:?}", backtrace::Backtrace::new());
         self.cells = CellStorage::V(VecStorage::new(cells));
@@ -1115,7 +1124,7 @@ impl Line {
 
         match &mut self.cells {
             CellStorage::V(c) => c,
-            CellStorage::C(_) => unreachable!(),
+            CellStorage::C(_) | CellStorage::Z(_) => unreachable!(),
         }
     }
 
@@ -1126,9 +1135,59 @@ impl Line {
     pub fn compress_for_scrollback(&mut self) {
         let cv = match &self.cells {
             CellStorage::V(v) => ClusteredLine::from_cell_vec(v.len(), self.visible_cells()),
-            CellStorage::C(_) => return,
+            CellStorage::C(_) | CellStorage::Z(_) => return,
         };
         self.cells = CellStorage::C(cv);
+    }
+
+    /// Whether this row's cold block has been read since it was stored.
+    pub fn cold_and_inflated(&self) -> bool {
+        matches!(&self.cells, CellStorage::Z(row) if row.block.inflated())
+    }
+
+    /// Memory the line holds, its own size included: an estimate that bounds
+    /// a scrollback by bytes.
+    pub fn heap_bytes(&self) -> usize {
+        let cells = match &self.cells {
+            CellStorage::V(v) => v.heap_bytes(),
+            CellStorage::C(cl) => cl.heap_bytes(),
+            CellStorage::Z(row) => row.block.heap_bytes_per_row(),
+        };
+        core::mem::size_of::<Self>()
+            + self.zones.capacity() * core::mem::size_of::<ZoneRange>()
+            + cells
+    }
+
+    // A cold row that changes becomes an ordinary clustered line again.
+    fn warm(&mut self) {
+        if let CellStorage::Z(row) = &self.cells {
+            self.cells = CellStorage::C(row.line().clone());
+        }
+    }
+
+    /// Stores `lines`, history rows no longer written, compressed as one block.
+    pub fn chill(lines: &mut [&mut Line]) {
+        for line in lines.iter_mut() {
+            line.compress_for_scrollback();
+        }
+        let refs: Option<Vec<&ClusteredLine>> = lines
+            .iter()
+            .map(|line| match &line.cells {
+                CellStorage::C(cl) => Some(cl),
+                CellStorage::Z(row) => Some(row.line()),
+                CellStorage::V(_) => None,
+            })
+            .collect();
+        let Some(refs) = refs else {
+            return;
+        };
+        let block = alloc::sync::Arc::new(ColdBlock::new(&refs));
+        for (row, line) in lines.iter_mut().enumerate() {
+            line.cells = CellStorage::Z(ColdRow {
+                block: block.clone(),
+                row,
+            });
+        }
     }
 
     pub fn cells_mut(&mut self) -> &mut [Cell] {
@@ -1153,6 +1212,7 @@ impl Line {
     /// line.
     pub fn set_last_cell_was_wrapped(&mut self, wrapped: bool, seqno: SequenceNo) {
         self.update_last_change_seqno(seqno);
+        self.warm();
         if let CellStorage::C(cl) = &mut self.cells {
             if cl.len() == 0 {
                 // Need to mark that implicit space as wrapped, so
@@ -1174,6 +1234,7 @@ impl Line {
     /// This function is used by rewrapping logic when joining wrapped
     /// lines back together.
     pub fn append_line(&mut self, other: Line, seqno: SequenceNo) {
+        self.warm();
         match &mut self.cells {
             CellStorage::V(cells) => {
                 for cell in other.visible_cells() {
@@ -1188,6 +1249,7 @@ impl Line {
                     cl.append(cell.as_cell());
                 }
             }
+            CellStorage::Z(_) => unreachable!("the line was warmed"),
         }
         self.update_last_change_seqno(seqno);
         self.invalidate_zones();

@@ -230,20 +230,52 @@ impl<'a> Performer<'a> {
         let mut p = std::mem::take(&mut self.print);
         let remapping = (self.shift_out && self.g1_charset == CharSet::DecLineDrawing)
             || (!self.shift_out && self.g0_charset == CharSet::DecLineDrawing);
-        if !self.insert && !remapping && p.bytes().all(|b| (0x20..0x7f).contains(&b)) {
-            self.print_ascii(&p, seqno);
-            std::mem::swap(&mut self.print, &mut p);
-            self.print.clear();
+        if self.insert || remapping {
+            self.print_graphemes(&p, seqno);
+        } else {
+            // Two adjacent printable ASCII characters are always separate
+            // graphemes, so the inside of an ASCII run prints a byte a cell.
+            // The run's first and last characters go with the text around
+            // them, which a prepended or combining character may join.
+            let bytes = p.as_bytes();
+            let mut pending = 0;
+            let mut i = 0;
+            while i < bytes.len() {
+                if !(0x20..0x7f).contains(&bytes[i]) {
+                    i += 1;
+                    continue;
+                }
+                let end = bytes[i..]
+                    .iter()
+                    .position(|b| !(0x20..0x7f).contains(b))
+                    .map_or(bytes.len(), |n| i + n);
+                let lo = if i > 0 { i + 1 } else { i };
+                let hi = if end < bytes.len() { end - 1 } else { end };
+                if lo < hi {
+                    self.print_graphemes(&p[pending..lo], seqno);
+                    self.print_ascii(&p[lo..hi], seqno);
+                    pending = hi;
+                }
+                i = end;
+            }
+            self.print_graphemes(&p[pending..], seqno);
+        }
+        std::mem::swap(&mut self.print, &mut p);
+        self.print.clear();
+    }
+
+    fn print_graphemes(&mut self, text: &str, seqno: wezterm_surface::SequenceNo) {
+        if text.is_empty() {
             return;
         }
         let normalized: String;
         let text = if self.config.normalize_output_to_unicode_nfc()
-            && is_nfc_quick(p.chars()) != IsNormalized::Yes
+            && is_nfc_quick(text.chars()) != IsNormalized::Yes
         {
-            normalized = p.as_str().nfc().collect();
+            normalized = text.nfc().collect();
             normalized.as_str()
         } else {
-            p.as_str()
+            text
         };
 
         for (n, g) in Graphemes::new(text).enumerate() {
@@ -325,9 +357,6 @@ impl<'a> Performer<'a> {
                 self.wrap_next = self.dec_auto_wrap;
             }
         }
-
-        std::mem::swap(&mut self.print, &mut p);
-        self.print.clear();
     }
 
     /// ConPTY, at the time of writing, does something horrible to rewrite

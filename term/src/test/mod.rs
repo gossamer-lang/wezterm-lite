@@ -1503,3 +1503,160 @@ fn synchronized_output_follows_its_mode_and_a_full_reset_ends_it() {
     term.end_synchronized_output();
     assert!(!term.synchronized_output());
 }
+
+#[test]
+fn mixed_text_keeps_the_graphemes_that_join_an_ascii_character() {
+    let mut term = TestTerm::new(2, 20, 0);
+    // A combining mark and a keycap join the ASCII character before them, an
+    // Arabic number sign the one after it; the ASCII between stays one a cell.
+    term.print("abe\u{301}cd 1\u{fe0f}\u{20e3}xy\u{600}9z \u{65e5}ok");
+    let cells: Vec<String> = term.screen().visible_lines()[0]
+        .visible_cells()
+        .map(|c| c.str().to_string())
+        .collect();
+    assert_eq!(
+        cells,
+        [
+            "a",
+            "b",
+            "e\u{301}",
+            "c",
+            "d",
+            " ",
+            "1\u{fe0f}\u{20e3}",
+            "x",
+            "y",
+            "\u{600}9",
+            "z",
+            " ",
+            "\u{65e5}",
+            "o",
+            "k"
+        ]
+    );
+}
+
+fn assert_history_rows(term: &TestTerm, rows: usize) {
+    let lines = term.screen().all_lines();
+    for (n, line) in lines.iter().take(rows).enumerate() {
+        assert_eq!(
+            line.as_str().trim_end(),
+            format!("row-{n} link 界"),
+            "row {n}"
+        );
+        let first = line.visible_cells().next().unwrap();
+        assert_eq!(
+            first.attrs().foreground(),
+            wezterm_cell::color::ColorAttribute::PaletteIndex((n % 8) as u8),
+            "row {n}"
+        );
+        let link = line.visible_cells().nth(format!("row-{n} ").len()).unwrap();
+        assert_eq!(
+            link.attrs().hyperlink().unwrap().uri(),
+            format!("https://e/{n}")
+        );
+        let wide = line.visible_cells().find(|c| c.str() == "界").unwrap();
+        assert_eq!(wide.width(), 2);
+    }
+}
+
+#[test]
+fn compacted_history_reads_back_whole_and_survives_a_rewrap() {
+    let mut term = TestTerm::new(10, 40, 5000);
+    let mut out = String::new();
+    for n in 0..3000 {
+        out.push_str(&format!(
+            "\x1b[3{}mrow-{n} \x1b]8;;https://e/{n}\x1b\\link\x1b]8;;\x1b\\ 界\x1b[0m\r\n",
+            n % 8
+        ));
+    }
+    term.print(out);
+    term.compact_history();
+    assert_history_rows(&term, 2990);
+    // The read inflated the rows; compacting again stores them compressed.
+    term.compact_history();
+    assert_history_rows(&term, 2990);
+    // A narrower screen rewraps every row, cold ones included, and a wider
+    // one joins them back.
+    term.resize(TerminalSize {
+        rows: 10,
+        cols: 12,
+        pixel_width: 96,
+        pixel_height: 160,
+        dpi: 0,
+    });
+    term.resize(TerminalSize {
+        rows: 10,
+        cols: 40,
+        pixel_width: 320,
+        pixel_height: 160,
+        dpi: 0,
+    });
+    term.compact_history();
+    assert_history_rows(&term, 2990);
+}
+
+#[derive(Debug)]
+struct ByteBoundConfig {
+    bytes: usize,
+}
+impl TerminalConfiguration for ByteBoundConfig {
+    fn scrollback_size(&self) -> usize {
+        100_000
+    }
+
+    fn scrollback_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    fn color_palette(&self) -> ColorPalette {
+        ColorPalette::default()
+    }
+}
+
+#[test]
+fn history_keeps_its_newest_rows_within_its_byte_bound() {
+    let mut term = Terminal::new(
+        TerminalSize {
+            rows: 10,
+            cols: 40,
+            pixel_width: 320,
+            pixel_height: 160,
+            dpi: 0,
+        },
+        Arc::new(ByteBoundConfig { bytes: 256 * 1024 }),
+        "WezTerm",
+        "O_o",
+        Box::new(Vec::new()),
+    );
+    let mut out = String::new();
+    for n in 0..20_000 {
+        out.push_str(&format!(
+            "\x1b[3{}mrow-{n} of the history\x1b[0m\r\n",
+            n % 8
+        ));
+    }
+    term.advance_bytes(out);
+    let screen = term.screen();
+    let kept = screen.scrollback_rows() - 10;
+    assert!(kept < 20_000, "{}", kept);
+    assert!(
+        screen.history_bytes() <= 256 * 1024,
+        "{}",
+        screen.history_bytes()
+    );
+    // The rows kept are the newest, oldest first, up to the screen's.
+    let lines = screen.all_lines();
+    let first = 19_991 - kept;
+    for (i, line) in lines.iter().take(kept).enumerate() {
+        assert_eq!(
+            line.as_str().trim_end(),
+            format!("row-{} of the history", first + i)
+        );
+    }
+    // Compacted rows hold markedly less.
+    let before = term.screen().history_bytes();
+    term.compact_history();
+    let compacted = term.screen().history_bytes();
+    assert!(compacted < before * 3 / 4, "{} of {}", compacted, before);
+}

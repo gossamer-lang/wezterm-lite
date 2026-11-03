@@ -147,6 +147,12 @@ pub trait TerminalConfiguration: Downcast + std::fmt::Debug + Send + Sync {
         3500
     }
 
+    /// The most memory the scrollback may hold, by the estimate of
+    /// `Line::heap_bytes`; past it the oldest rows go first.
+    fn scrollback_bytes(&self) -> usize {
+        usize::MAX
+    }
+
     /// Return true if the embedding application wants to use CSI-u encoding
     /// for keys that would otherwise be ambiguous.
     /// <http://www.leonerd.org.uk/hacks/fixterms/>

@@ -15,6 +15,15 @@ pub(crate) struct VecStorage {
 }
 
 impl VecStorage {
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.cells.capacity() * core::mem::size_of::<Cell>()
+            + self
+                .cells
+                .iter()
+                .map(|c| c.attrs().heap_bytes())
+                .sum::<usize>()
+    }
+
     pub(crate) fn new(cells: Vec<Cell>) -> Self {
         Self { cells }
     }

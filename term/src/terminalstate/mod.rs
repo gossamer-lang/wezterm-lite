@@ -643,6 +643,13 @@ impl TerminalState {
 
     /// Returns a reference to the active screen (either the primary or
     /// the alternate screen).
+    /// Stores the history rows well above the screen compressed, and those a
+    /// read inflated since. Cheap when there is nothing new to compress, so an
+    /// embedder can call it whenever its terminal is quiet.
+    pub fn compact_history(&mut self) {
+        self.screen.screen.chill();
+    }
+
     pub fn screen(&self) -> &Screen {
         &self.screen
     }
