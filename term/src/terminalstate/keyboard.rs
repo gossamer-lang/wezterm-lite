@@ -57,6 +57,16 @@ impl TerminalState {
         Ok(())
     }
 
+    /// The flags of kitty's keyboard protocol while a program has asked for
+    /// it; `None` while it uses another encoding. The embedder encodes keys
+    /// for it with `input_types::KeyEvent::encode_kitty`.
+    pub fn kitty_keyboard_flags(&self) -> Option<wezterm_escape_parser::csi::KittyKeyboardFlags> {
+        match self.effective_keyboard_encoding() {
+            KeyboardEncoding::Kitty(flags) => Some(flags),
+            _ => None,
+        }
+    }
+
     pub fn key_up(&mut self, key: KeyCode, mods: KeyModifiers) -> anyhow::Result<()> {
         self.key_up_down(key, mods, false)
     }

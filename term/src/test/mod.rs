@@ -1660,3 +1660,55 @@ fn history_keeps_its_newest_rows_within_its_byte_bound() {
     let compacted = term.screen().history_bytes();
     assert!(compacted < before * 3 / 4, "{} of {}", compacted, before);
 }
+
+#[derive(Debug)]
+struct KittyKeyboardConfig;
+impl TerminalConfiguration for KittyKeyboardConfig {
+    fn color_palette(&self) -> ColorPalette {
+        ColorPalette::default()
+    }
+
+    fn enable_kitty_keyboard(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn a_program_pushes_and_pops_kitty_keyboard_flags() {
+    use wezterm_escape_parser::csi::KittyKeyboardFlags;
+    let mut term = Terminal::new(
+        TerminalSize {
+            rows: 4,
+            cols: 20,
+            pixel_width: 160,
+            pixel_height: 64,
+            dpi: 0,
+        },
+        Arc::new(KittyKeyboardConfig),
+        "WezTerm",
+        "O_o",
+        Box::new(Vec::new()),
+    );
+    assert_eq!(term.kitty_keyboard_flags(), None);
+    term.advance_bytes("\x1b[>1u");
+    assert_eq!(
+        term.kitty_keyboard_flags(),
+        Some(KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
+    let shift_enter = input_types::KeyEvent {
+        key: input_types::KeyCode::Char('\r'),
+        modifiers: input_types::Modifiers::SHIFT,
+        leds: input_types::KeyboardLedStatus::empty(),
+        repeat_count: 1,
+        key_is_down: true,
+        raw: None,
+        #[cfg(windows)]
+        win32_uni_char: None,
+    };
+    assert_eq!(
+        shift_enter.encode_kitty(term.kitty_keyboard_flags().unwrap()),
+        "\x1b[13;2u"
+    );
+    term.advance_bytes("\x1b[<u");
+    assert_eq!(term.kitty_keyboard_flags(), None);
+}

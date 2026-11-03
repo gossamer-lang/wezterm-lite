@@ -29,6 +29,8 @@ pub use config::TerminalConfiguration;
 pub mod input;
 pub mod keys;
 pub use crate::input::*;
+/// The key event types kitty's keyboard protocol encodes from.
+pub use wezterm_input_types as input_types;
 
 pub use wezterm_cell::*;
 pub use wezterm_surface::line::*;
