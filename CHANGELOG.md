@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3 - Delete under the kitty protocol
+
+- An unmodified Delete encodes as `CSI 3 ~` under the kitty keyboard protocol, as kitty sends it, instead of a backspace character.
+
 ## 0.1.2 - Compressed history and a byte bound
 
 - `Terminal::compact_history` stores history rows well above the screen compressed, in blocks of 64 rows: about a third of the memory for text and colored output. A row read later inflates its block until the next compaction.

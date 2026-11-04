@@ -1740,7 +1740,9 @@ impl KeyEvent {
             // Check for simple text generating keys
             match &self.key {
                 Char('\x08') => return '\x7f'.to_string(),
-                Char('\x7f') => return '\x08'.to_string(),
+                // Delete is a functional key in every mode of the protocol,
+                // never the backspace character.
+                Char('\x7f') => return "\x1b[3~".to_string(),
                 // With DISAMBIGUATE_ESCAPE_CODES, ESC must not be sent as a
                 // raw \x1b byte — the entire point of the flag is to eliminate
                 // that ambiguity.  Let it fall through to the CSI-u path below
@@ -2576,6 +2578,26 @@ mod test {
             .encode_kitty(flags),
             "\x1b[127;5u".to_string()
         );
+    }
+
+    #[test]
+    fn kitty_delete_is_its_functional_key_with_or_without_modifiers() {
+        let flags = KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES;
+        let delete = |modifiers| {
+            KeyEvent {
+                key: KeyCode::Char('\x7f'),
+                modifiers,
+                leds: KeyboardLedStatus::empty(),
+                repeat_count: 1,
+                key_is_down: true,
+                raw: None,
+                #[cfg(windows)]
+                win32_uni_char: None,
+            }
+            .encode_kitty(flags)
+        };
+        assert_eq!(delete(Modifiers::NONE), "\x1b[3~");
+        assert_eq!(delete(Modifiers::CTRL), "\x1b[3;5~");
     }
 
     #[test]
