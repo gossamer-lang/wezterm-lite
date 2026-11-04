@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4 - Cursor after a resize
+
+- A cursor at the start of its own line, such as a shell's below the last output or the one a full-screen program returns to, keeps its row and column when the terminal changes width, instead of moving up a row.
+
 ## 0.1.3 - Delete under the kitty protocol
 
 - An unmodified Delete encodes as `CSI 3 ~` under the kitty keyboard protocol, as kitty sends it, instead of a backspace character.

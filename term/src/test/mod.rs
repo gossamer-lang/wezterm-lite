@@ -917,6 +917,40 @@ fn test_resize_2162() {
     term.assert_cursor_pos(19, 0, None, Some(7));
 }
 
+#[test]
+fn a_cursor_at_the_start_of_its_own_line_keeps_its_row_across_a_resize() {
+    for cols in [8, 12] {
+        let mut term = TestTerm::new(4, 10, 0);
+        term.print("one\r\ntwo\r\n");
+        term.resize(TerminalSize {
+            rows: 4,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+            dpi: 0,
+        });
+        term.assert_cursor_pos(0, 2, Some(&format!("resized to {cols} columns")), None);
+    }
+}
+
+#[test]
+fn leaving_the_alternate_screen_after_a_resize_restores_the_prompt_position() {
+    let mut term = TestTerm::new(4, 10, 0);
+    term.print("one\r\ntwo\r\n");
+    term.print("\x1b[?1049h\x1b[3;4Hfull screen");
+    for cols in [8, 10] {
+        term.resize(TerminalSize {
+            rows: 4,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+            dpi: 0,
+        });
+    }
+    term.print("\x1b[?1049l");
+    term.assert_cursor_pos(0, 2, None, None);
+}
+
 /// Test the behavior of wrapped lines when we resize the terminal
 /// wider and then narrower.
 #[test]
