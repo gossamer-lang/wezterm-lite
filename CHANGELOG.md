@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5 - Cursor after a resize with full history
+
+- Narrowing a terminal whose history is full keeps the row the cursor is on, blank or not, so a shell prompt below a full-screen program returns to its own line, at column zero, after the terminal was resized while the program ran.
+
 ## 0.1.4 - Cursor after a resize
 
 - A cursor at the start of its own line, such as a shell's below the last output or the one a full-screen program returns to, keeps its row and column when the terminal changes width, instead of moving up a row.

@@ -951,6 +951,38 @@ fn leaving_the_alternate_screen_after_a_resize_restores_the_prompt_position() {
     term.assert_cursor_pos(0, 2, None, None);
 }
 
+#[test]
+fn leaving_the_alternate_screen_after_resizes_with_full_history_restores_the_prompt_position() {
+    let size = |cols| TerminalSize {
+        rows: 4,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+        dpi: 0,
+    };
+    for widths in [&[6][..], &[5, 10]] {
+        let mut term = TestTerm::new(4, 10, 3);
+        for row in ["one", "two two", "three", "four four"] {
+            term.print(format!("{row}\r\n"));
+        }
+        term.print("$ run\r\n\x1b[?1049h\x1b[2J\x1b[3;4Hfull screen");
+        for &cols in widths {
+            term.resize(size(cols));
+        }
+        term.print("\x1b[?1049l");
+        let cursor = term.cursor_pos();
+        let lines = term.screen().visible_lines();
+        let reason = format!("resized to {widths:?}");
+        assert_eq!(cursor.x, 0, "{reason}");
+        assert_eq!(lines[cursor.y as usize].as_str().trim_end(), "", "{reason}");
+        assert_eq!(
+            lines[cursor.y as usize - 1].as_str().trim_end(),
+            "$ run",
+            "{reason}"
+        );
+    }
+}
+
 /// Test the behavior of wrapped lines when we resize the terminal
 /// wider and then narrower.
 #[test]

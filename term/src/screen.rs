@@ -198,9 +198,11 @@ impl Screen {
         // we may need to scroll the lines to make room.  However,
         // if the bottom line(s) are whitespace, we'll prune those
         // out first in the rewrap case so that we don't lose any
-        // real information off the top of the scrollback
+        // real information off the top of the scrollback. The cursor's
+        // row stays, blank or not: the cursor position indexes it.
         let capacity = physical_rows + self.scrollback_size();
         while self.lines.len() > capacity
+            && self.lines.len() > adjusted_cursor.1 + 1
             && self.lines.back().map(Line::is_whitespace).unwrap_or(false)
         {
             self.lines.pop_back();
