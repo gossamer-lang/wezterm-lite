@@ -253,6 +253,10 @@ pub struct TerminalState {
     /// printed character
     wrap_next: bool,
 
+    /// The last character of the text printed last, kept or elided, which
+    /// decides whether marks that start the next text join it.
+    last_printed: Option<char>,
+
     clear_semantic_attribute_on_newline: bool,
 
     /// If true, writing a character inserts a new cell
@@ -465,6 +469,7 @@ impl TerminalState {
             left_and_right_margins: 0..size.cols,
             left_and_right_margin_mode: false,
             wrap_next: false,
+            last_printed: None,
             clear_semantic_attribute_on_newline: false,
             // We default auto wrap to true even though the default for
             // a dec terminal is false, because it is more useful this way.

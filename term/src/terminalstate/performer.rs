@@ -15,7 +15,7 @@ use unicode_normalization::{is_nfc_quick, IsNormalized, UnicodeNormalization};
 use wezterm_bidi::ParagraphDirectionHint;
 use wezterm_cell::{
     char_column_width, grapheme_column_width, is_white_space_grapheme, text_char_column_width,
-    Cell, CellAttributes, SemanticType,
+    Cell, CellAttributes, SemanticType, UnicodeVersion,
 };
 use wezterm_escape_parser::csi::{
     CharacterPath, EraseInDisplay, Keyboard, KittyKeyboardFlags, KittyKeyboardMode,
@@ -96,6 +96,66 @@ static STANDING_ALONE_BITS: [u64; 1024] = {
 fn stands_alone(c: char) -> bool {
     let c = c as u32;
     c < 0x10000 && STANDING_ALONE_BITS[(c >> 6) as usize] >> (c & 63) & 1 == 1
+}
+
+// The columns each 16-bit character standing alone takes as text, two bits
+// a character: 0 for one that does not stand alone, 3 for one that takes no
+// column.
+struct AloneWidths([u8; 0x10000 / 4]);
+
+impl AloneWidths {
+    fn new(version: &UnicodeVersion) -> Box<Self> {
+        let mut widths = Box::new(Self([0; 0x10000 / 4]));
+        for (first, last) in STANDING_ALONE {
+            for c in (first..=last).filter_map(char::from_u32) {
+                let width = match text_char_column_width(c, version) {
+                    0 => 3,
+                    width => width as u8,
+                };
+                widths.0[c as usize >> 2] |= width << ((c as usize & 3) * 2);
+            }
+        }
+        widths
+    }
+
+    fn get(&self, c: u32) -> u8 {
+        match self.0.get((c >> 2) as usize) {
+            Some(four) => four >> ((c & 3) * 2) & 3,
+            None => 0,
+        }
+    }
+}
+
+// The widths table for `version`, when no per-character widths override it:
+// its widths then follow from whether it is Unicode 9 or later and whether
+// ambiguous characters are wide.
+fn alone_widths(version: &UnicodeVersion) -> Option<&'static AloneWidths> {
+    static TABLES: [std::sync::OnceLock<Box<AloneWidths>>; 4] =
+        [const { std::sync::OnceLock::new() }; 4];
+    if version.cell_widths.is_some() {
+        return None;
+    }
+    let table = usize::from(version.version >= 9) << 1 | usize::from(version.ambiguous_are_wide);
+    Some(TABLES[table].get_or_init(|| AloneWidths::new(version)))
+}
+
+// The character of `text` at byte `at`, a character boundary, and its length
+// in bytes. Away from the end the length comes from the lead byte without a
+// branch, as scripts of different lengths mix unpredictably.
+#[inline(always)]
+fn decode(text: &str, at: usize) -> Option<(u32, usize)> {
+    let bytes = text.as_bytes();
+    let Some(four) = bytes.get(at..at + 4) else {
+        let c = text[at..].chars().next()?;
+        return Some((c as u32, c.len_utf8()));
+    };
+    let word = u32::from_be_bytes([four[0], four[1], four[2], four[3]]);
+    // The lead byte's leading ones: none for ASCII, else the length.
+    let ones = (!word).leading_zeros();
+    let len = ones.max(1);
+    let lead = (word >> 24) & (0x7f >> ones);
+    let all = lead << 18 | (word >> 16 & 0x3f) << 12 | (word >> 8 & 0x3f) << 6 | word & 0x3f;
+    Some((all >> (6 * (4 - len)), len as usize))
 }
 
 // The grapheme `text` starts with, which must start at a grapheme boundary,
@@ -218,6 +278,7 @@ impl<'a> Performer<'a> {
             return false;
         };
         let y = self.cursor.y;
+        let last_printed = self.last_printed;
         let screen = self.screen_mut();
         let phys = screen.phys_row(y);
         let line = screen.line_mut(phys);
@@ -235,6 +296,15 @@ impl<'a> Performer<'a> {
         else {
             return false;
         };
+        // Marks extend the cell only when they join the character printed
+        // before them, as they would in text printed whole.
+        let before = match last_printed {
+            Some(c) => String::from(c),
+            None => text.clone(),
+        };
+        if Graphemes::new(&format!("{before}{marks}")).nth(1).is_some() {
+            return false;
+        }
         let joined = format!("{text}{marks}");
         line.set_cell_grapheme(at, bounded_grapheme(&joined), width, attrs, seqno);
         true
@@ -318,6 +388,7 @@ impl<'a> Performer<'a> {
         } else {
             self.print_graphemes(&p, seqno);
         }
+        self.last_printed = p.chars().next_back();
         std::mem::swap(&mut self.print, &mut p);
         self.print.clear();
     }
@@ -388,34 +459,27 @@ impl<'a> Performer<'a> {
             // A character standing alone before another is a grapheme by
             // itself; a stretch of them joins the run here.
             if !remaps && !self.insert && !self.wrap_next {
-                let end = self.left_and_right_margins.end;
-                let mut chars = text[at..].chars().peekable();
-                let mut took = 0;
-                let mut alone = None;
-                while let (Some(c), Some(&next)) = (chars.next(), chars.peek()) {
-                    if !alone.unwrap_or_else(|| stands_alone(c)) {
-                        break;
+                let took = match alone_widths(&self.unicode_version) {
+                    Some(widths) => {
+                        self.run_alone(text, &mut at, &mut span, &mut run_at, seqno, |c| {
+                            widths.get(c)
+                        })
                     }
-                    let next_alone = stands_alone(next);
-                    if !next_alone {
-                        break;
+                    None => {
+                        let version = self.unicode_version.clone();
+                        self.run_alone(text, &mut at, &mut span, &mut run_at, seqno, |c| {
+                            match char::from_u32(c) {
+                                Some(c) if stands_alone(c) => {
+                                    match text_char_column_width(c, &version) {
+                                        0 => 3,
+                                        width => width as u8,
+                                    }
+                                }
+                                _ => 0,
+                            }
+                        })
                     }
-                    alone = Some(next_alone);
-                    // No character standing alone presents as an emoji.
-                    let width = text_char_column_width(c, &self.unicode_version);
-                    if width == 0 || self.cursor.x + took + width >= end {
-                        break;
-                    }
-                    if self.run.is_empty() || span.end != at {
-                        self.print_run(&text[span.clone()], run_at, seqno);
-                        run_at = (self.cursor.x + took, self.cursor.y);
-                        span = at..at;
-                    }
-                    self.run.push((c.len_utf8(), width));
-                    at += c.len_utf8();
-                    span.end = at;
-                    took += width;
-                }
+                };
                 if took > 0 {
                     ahead = None;
                     self.cursor.x += took;
@@ -538,6 +602,47 @@ impl<'a> Performer<'a> {
             }
         }
         self.print_run(&text[span], run_at, seqno);
+    }
+
+    // Adds the characters standing alone from `at` on to the run while the
+    // next one stands alone too and the row has room, answering the columns
+    // they take. `widths` gives a character's columns as `AloneWidths` does.
+    fn run_alone(
+        &mut self,
+        text: &str,
+        at: &mut usize,
+        span: &mut std::ops::Range<usize>,
+        run_at: &mut (usize, VisibleRowIndex),
+        seqno: wezterm_surface::SequenceNo,
+        widths: impl Fn(u32) -> u8,
+    ) -> usize {
+        let end = self.left_and_right_margins.end;
+        let mut took = 0;
+        let Some((c, mut len)) = decode(text, *at) else {
+            return 0;
+        };
+        let mut width = widths(c);
+        while width != 0 {
+            let Some((next, next_len)) = decode(text, *at + len) else {
+                break;
+            };
+            let next_width = widths(next);
+            // No character standing alone presents as an emoji.
+            if width == 3 || next_width == 0 || self.cursor.x + took + usize::from(width) >= end {
+                break;
+            }
+            if self.run.is_empty() || span.end != *at {
+                self.print_run(&text[span.clone()], *run_at, seqno);
+                *run_at = (self.cursor.x + took, self.cursor.y);
+                *span = *at..*at;
+            }
+            self.run.push((len, usize::from(width)));
+            *at += len;
+            span.end = *at;
+            took += usize::from(width);
+            (len, width) = (next_len, next_width);
+        }
+        took
     }
 
     // Places the run, the graphemes of `text`, from `at` on in the pen, and

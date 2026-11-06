@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.6 - Faster text in mixed scripts
+
+- Text in scripts other than Latin, such as Greek, Cyrillic, CJK and Hangul, and text that mixes them, parses faster: the width of each character standing alone comes from one table, and text runs are checked as UTF-8 with SIMD.
+- A combining mark at the start of output joins the character before it only when the two form one grapheme, as they would in output that arrives whole; a soft hyphen or a mark after an elided character no longer joins the cell before it.
+
 ## 0.1.5 - Cursor after a resize with full history
 
 - Narrowing a terminal whose history is full keeps the row the cursor is on, blank or not, so a shell prompt below a full-screen program returns to its own line, at column zero, after the terminal was resized while the program ran.

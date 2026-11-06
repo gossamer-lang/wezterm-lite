@@ -47,6 +47,7 @@ struct TestTerm {
 #[derive(Debug)]
 struct TestTermConfig {
     scrollback: usize,
+    unicode_version: UnicodeVersion,
 }
 impl TerminalConfiguration for TestTermConfig {
     fn scrollback_size(&self) -> usize {
@@ -60,10 +61,23 @@ impl TerminalConfiguration for TestTermConfig {
     fn enable_kitty_graphics(&self) -> bool {
         true
     }
+
+    fn unicode_version(&self) -> UnicodeVersion {
+        self.unicode_version.clone()
+    }
 }
 
 impl TestTerm {
     fn new(height: usize, width: usize, scrollback: usize) -> Self {
+        Self::with_unicode(height, width, scrollback, UnicodeVersion::new(9))
+    }
+
+    fn with_unicode(
+        height: usize,
+        width: usize,
+        scrollback: usize,
+        unicode_version: UnicodeVersion,
+    ) -> Self {
         let _ = env_logger::Builder::new()
             .is_test(true)
             .filter_level(log::LevelFilter::Trace)
@@ -77,7 +91,10 @@ impl TestTerm {
                 pixel_height: height * 16,
                 dpi: 0,
             },
-            Arc::new(TestTermConfig { scrollback }),
+            Arc::new(TestTermConfig {
+                scrollback,
+                unicode_version,
+            }),
             "WezTerm",
             "O_o",
             Box::new(Vec::new()),
@@ -1472,7 +1489,10 @@ fn a_reply_is_written_before_the_output_that_asked_for_it_returns() {
             pixel_height: 64,
             dpi: 0,
         },
-        Arc::new(TestTermConfig { scrollback: 0 }),
+        Arc::new(TestTermConfig {
+            scrollback: 0,
+            unicode_version: UnicodeVersion::new(9),
+        }),
         "WezTerm",
         "O_o",
         Box::new(replies.clone()),
@@ -1636,6 +1656,63 @@ fn text_printed_whole_wraps_as_it_does_printed_a_grapheme_at_a_time() {
         assert_eq!(cells(&whole), cells(&pieces), "{} columns", cols);
         let (a, b) = (whole.cursor_pos(), pieces.cursor_pos());
         assert_eq!((a.x, a.y), (b.x, b.y), "{} columns", cols);
+    }
+}
+
+#[test]
+fn every_16_bit_character_prints_whole_as_it_does_a_grapheme_at_a_time() {
+    let text: Vec<char> = (0x20..0x10000)
+        .filter(|c| !(0x7f..0xa0).contains(c))
+        .filter_map(char::from_u32)
+        .collect();
+    let cells = |term: &TestTerm| -> Vec<(String, usize)> {
+        term.screen()
+            .visible_lines()
+            .iter()
+            .flat_map(|line| {
+                line.visible_cells()
+                    .map(|c| (c.str().to_string(), c.width()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let widths = std::collections::HashMap::from([(0x41, 2), (0x3b1, 2), (0x4e00, 1)]);
+    let versions = [
+        UnicodeVersion::new(9),
+        UnicodeVersion::new(8),
+        UnicodeVersion {
+            ambiguous_are_wide: true,
+            ..UnicodeVersion::new(9)
+        },
+        UnicodeVersion {
+            cell_widths: Some(Arc::new(widths)),
+            ..UnicodeVersion::new(9)
+        },
+    ];
+    for version in versions {
+        for chunk in text.chunks(300) {
+            let chunk: String = chunk.iter().collect();
+            let mut whole = TestTerm::with_unicode(24, 37, 0, version.clone());
+            whole.print(&chunk);
+            let mut pieces = TestTerm::with_unicode(24, 37, 0, version.clone());
+            for g in finl_unicode::grapheme_clusters::Graphemes::new(&chunk) {
+                pieces.print(g);
+            }
+            let first = chunk.chars().next().map(|c| c as u32);
+            let (a, b) = (cells(&whole), cells(&pieces));
+            let near = |cells: &[(String, usize)], at: usize| {
+                cells[at.saturating_sub(2)..(at + 3).min(cells.len())].to_vec()
+            };
+            if let Some(at) = (0..a.len().max(b.len())).find(|&i| a.get(i) != b.get(i)) {
+                panic!(
+                    "{version:?} from {first:x?}, cell {at}: {:?} printed whole, {:?} a grapheme at a time",
+                    near(&a, at),
+                    near(&b, at)
+                );
+            }
+            let (a, b) = (whole.cursor_pos(), pieces.cursor_pos());
+            assert_eq!((a.x, a.y), (b.x, b.y), "{version:?} from {first:x?}");
+        }
     }
 }
 

@@ -135,7 +135,7 @@ fn text_run(bytes: &[u8]) -> &str {
         return "";
     }
     let candidate = &bytes[..end];
-    match std::str::from_utf8(candidate) {
+    match simdutf8::compat::from_utf8(candidate) {
         Ok(text) => text,
         Err(error) => std::str::from_utf8(&candidate[..error.valid_up_to()]).unwrap_or_default(),
     }
