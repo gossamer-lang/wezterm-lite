@@ -87,9 +87,8 @@ impl ColorPalette {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref DEFAULT_PALETTE: ColorPalette = ColorPalette::compute_default();
-}
+static DEFAULT_PALETTE: std::sync::LazyLock<ColorPalette> =
+    std::sync::LazyLock::new(ColorPalette::compute_default);
 
 impl Default for ColorPalette {
     /// Construct a default color palette

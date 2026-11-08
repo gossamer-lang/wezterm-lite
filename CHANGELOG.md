@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.7 - One inflater with the image decoders
+
+- wezterm-term inflates compressed kitty images with miniz_oxide 0.9, the version the png decoder uses, so a program that links both carries one copy.
+- History compression uses lz4_flex 0.14 and the image cache lru 0.19; wezterm-term no longer depends on lazy_static.
+
 ## 0.1.6 - Faster text in mixed scripts
 
 - Text in scripts other than Latin, such as Greek, Cyrillic, CJK and Hangul, and text that mixes them, parses faster: the width of each character standing alone comes from one table, and text runs are checked as UTF-8 with SIMD.
