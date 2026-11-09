@@ -309,6 +309,15 @@ impl ClusteredLine {
         }
     }
 
+    /// Empties the line and keeps its buffers.
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.is_double_wide = None;
+        self.clusters.clear();
+        self.len = 0;
+        self.last_cell_width = None;
+    }
+
     /// Appends `text`, printable ASCII, one cell a byte, all in `attrs`: what
     /// `append_grapheme` does for each byte, as one extension of the line.
     pub fn append_ascii(&mut self, text: &str, attrs: CellAttributes) {

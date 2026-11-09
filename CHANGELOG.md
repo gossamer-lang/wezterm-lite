@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.8 - Faster scrolling past a full scrollback
+
+- A row recycled from the top of a full scrollback keeps its buffers, so plain output that keeps scrolling parses about 20% faster.
+
 ## 0.1.7 - One inflater with the image decoders
 
 - wezterm-term inflates compressed kitty images with miniz_oxide 0.9, the version the png decoder uses, so a program that links both carries one copy.

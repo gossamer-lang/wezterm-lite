@@ -127,6 +127,22 @@ impl Line {
         }
     }
 
+    /// Makes this line a new, empty one, keeping its allocations when it has
+    /// them to keep.
+    pub fn renew(&mut self, seqno: SequenceNo) {
+        match &mut self.cells {
+            CellStorage::C(cl) => cl.clear(),
+            _ => self.cells = CellStorage::C(ClusteredLine::new()),
+        }
+        self.bits = LineBits::NONE;
+        self.seqno = seqno;
+        self.zones.clear();
+        #[cfg(feature = "appdata")]
+        {
+            *self.appdata.lock().unwrap() = None;
+        }
+    }
+
     /// Computes a hash over the line that will change if the way that
     /// the line contents are shaped would change.
     /// This is independent of the seqno and is based purely on the

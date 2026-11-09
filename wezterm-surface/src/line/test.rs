@@ -14,6 +14,18 @@ use wezterm_cell::{Cell, CellAttributes};
 /// wrong.
 /// <https://github.com/wezterm/wezterm/issues/2568>
 #[test]
+fn a_renewed_line_is_a_new_line() {
+    let mut line = Line::from_text("wide 界 text", &CellAttributes::blank(), 1, None);
+    line.compress_for_scrollback();
+    line.set_last_cell_was_wrapped(true, 2);
+    line.renew(7);
+    assert_eq!(line, Line::new(7));
+    assert_eq!(line.len(), 0);
+    line.set_cells_ascii(0, "ok", CellAttributes::blank(), 8);
+    assert_eq!(line.as_str(), "ok");
+}
+
+#[test]
 fn append_line() {
     let mut line1: Line = "0123456789".into();
     let line2: Line = "グループaa".into();

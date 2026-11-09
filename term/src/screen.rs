@@ -767,7 +767,8 @@ impl Screen {
                     self.history_bytes = self.history_bytes.saturating_sub(line.heap_bytes());
                 }
                 let line = if default_blank == blank_attr {
-                    Line::new(seqno)
+                    line.renew(seqno);
+                    line
                 } else {
                     // Make the line like a new one of the appropriate width
                     line.resize_and_clear(self.physical_cols, seqno, blank_attr.clone());
