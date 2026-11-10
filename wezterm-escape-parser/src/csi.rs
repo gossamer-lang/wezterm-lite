@@ -1715,6 +1715,51 @@ impl CSI {
     }
 }
 
+/// The one rendition a `CSI ... m` sets when its parameters take one of the
+/// common shapes: a single code, or one 256-color or 24-bit color with `;`
+/// between its parts. `None` for every other shape, which [`CSI::parse`]
+/// takes. Where both answer, they answer the same.
+pub(crate) fn simple_sgr(params: &[CsiParam]) -> Option<Sgr> {
+    use CsiParam::{Integer, P};
+    let color = |code: i64, spec: ColorSpec| match code {
+        38 => Sgr::Foreground(spec),
+        48 => Sgr::Background(spec),
+        _ => Sgr::UnderlineColor(spec),
+    };
+    match params {
+        [
+            Integer(code @ (38 | 48 | 58)),
+            P(b';'),
+            Integer(5),
+            P(b';'),
+            idx,
+        ] => Some(color(*code, ColorSpec::PaletteIndex(to_u8(idx).ok()?))),
+        [
+            Integer(code @ (38 | 48 | 58)),
+            P(b';'),
+            Integer(2),
+            P(b';'),
+            red,
+            P(b';'),
+            green,
+            P(b';'),
+            blue,
+        ] => {
+            let rgb = RgbColor::new_8bpc(to_u8(red).ok()?, to_u8(green).ok()?, to_u8(blue).ok()?);
+            Some(color(*code, rgb.into()))
+        }
+        [Integer(_)] => CSIParser {
+            parameters_truncated: false,
+            control: 'm',
+            params: Some(params),
+            orig_params: params,
+        }
+        .sgr(params)
+        .ok(),
+        _ => None,
+    }
+}
+
 /// A little helper to convert i64 -> u8 if safe
 fn to_u8(v: &CsiParam) -> Result<u8, ()> {
     match v {
@@ -2964,6 +3009,62 @@ impl<'a> Iterator for CSIParser<'a> {
 mod test {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn common_sgr_shapes_parse_directly_as_the_general_parser_does() {
+        let shapes: &[&[i64]] = &[
+            &[0],
+            &[1],
+            &[4],
+            &[22],
+            &[31],
+            &[39],
+            &[97],
+            &[107],
+            &[1231231],
+            &[38, 5, 0],
+            &[38, 5, 255],
+            &[38, 5, 256],
+            &[48, 5, 17],
+            &[58, 5, 220],
+            &[38, 2, 1, 2, 3],
+            &[48, 2, 255, 128, 0],
+            &[58, 2, 9, 9, 9],
+            &[38, 2, 256, 0, 0],
+            &[38, 5, 1, 2],
+            &[1, 31],
+            &[39, 5, 1],
+        ];
+        for shape in shapes {
+            let mut params = vec![];
+            for &p in shape.iter() {
+                if !params.is_empty() {
+                    params.push(CsiParam::P(b';'));
+                }
+                params.push(CsiParam::Integer(p));
+            }
+            let general: Vec<CSI> = CSI::parse(&params, false, 'm').collect();
+            let direct = super::simple_sgr(&params);
+            let common = matches!(
+                shape,
+                [0 | 1 | 4 | 22 | 31 | 39 | 97 | 107]
+                    | [38 | 48 | 58, 5, 0..=255]
+                    | [38 | 48 | 58, 2, 0..=255, 0..=255, 0..=255]
+            );
+            assert_eq!(direct.is_some(), common, "{shape:?}");
+            if let Some(sgr) = direct {
+                assert_eq!(general, vec![CSI::Sgr(sgr)], "{shape:?}");
+            }
+        }
+        let colon = [
+            CsiParam::Integer(38),
+            CsiParam::P(b':'),
+            CsiParam::Integer(5),
+            CsiParam::P(b':'),
+            CsiParam::Integer(9),
+        ];
+        assert_eq!(super::simple_sgr(&colon), None);
+    }
 
     fn parse(control: char, params: &[i64], expected: &str) -> Vec<CSI> {
         let mut cparams = vec![];

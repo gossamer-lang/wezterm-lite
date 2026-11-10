@@ -350,6 +350,12 @@ impl<'a, F: FnMut(Action)> VTActor for Performer<'a, F> {
     }
 
     fn csi_dispatch(&mut self, params: &[CsiParam], parameters_truncated: bool, control: u8) {
+        if control == b'm'
+            && let Some(sgr) = crate::csi::simple_sgr(params)
+        {
+            (self.callback)(Action::CSI(CSI::Sgr(sgr)));
+            return;
+        }
         for action in CSI::parse(params, parameters_truncated, control as char) {
             (self.callback)(Action::CSI(action));
         }

@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.1.9 - Faster colors
+
+- A color or style sequence of the common shapes (one code, a 256-color or a 24-bit color) parses straight into its rendition, so colored output parses faster.
 ## 0.1.8 - Faster scrolling past a full scrollback
 
 - A row recycled from the top of a full scrollback keeps its buffers, so plain output that keeps scrolling parses about 20% faster.
