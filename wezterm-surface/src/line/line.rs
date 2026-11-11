@@ -1,6 +1,7 @@
 use crate::cellcluster::CellCluster;
 use crate::hyperlink::Rule;
 use crate::line::cellref::CellRef;
+use crate::line::cellrun::CellRun;
 use crate::line::clusterline::ClusteredLine;
 use crate::line::cold::{ColdBlock, ColdRow};
 use crate::line::linebits::LineBits;
@@ -818,13 +819,13 @@ impl Line {
         self.set_cell(idx, Cell::new_grapheme_with_width(text, width, attr), seqno);
     }
 
-    /// Sets the cells from `idx` on to the graphemes of `run`, each with its
-    /// cell width, all in `attr`: `set_cell_grapheme` for each in turn.
+    /// Sets the cells from `idx` on to the graphemes `run` describes, which
+    /// cover `text`, all in `attr`: `set_cell_grapheme` for each in turn.
     pub fn set_cells_graphemes(
         &mut self,
         idx: usize,
         text: &str,
-        run: &[(usize, usize)],
+        run: &CellRun,
         attr: CellAttributes,
         seqno: SequenceNo,
     ) {
@@ -845,10 +846,7 @@ impl Line {
             }
         }
         let mut at = idx;
-        let mut rest = text;
-        for &(len, w) in run {
-            let (g, after) = rest.split_at(len);
-            rest = after;
+        for (g, w) in run.graphemes(text) {
             self.set_cell_grapheme(at, g, w, attr.clone(), seqno);
             at += w;
         }

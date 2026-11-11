@@ -135,6 +135,10 @@ fn text_run(bytes: &[u8]) -> &str {
         return "";
     }
     let candidate = &bytes[..end];
+    if candidate.is_ascii() {
+        // SAFETY: every byte is ASCII, and ASCII is valid UTF-8.
+        return unsafe { std::str::from_utf8_unchecked(candidate) };
+    }
     match simdutf8::compat::from_utf8(candidate) {
         Ok(text) => text,
         Err(error) => std::str::from_utf8(&candidate[..error.valid_up_to()]).unwrap_or_default(),

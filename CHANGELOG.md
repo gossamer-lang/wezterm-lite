@@ -1,8 +1,15 @@
 # Changelog
 
+## 0.1.10 - Faster unicode and colored output
+
+- Text in scripts other than ASCII is placed along a row without recording each character separately: a run keeps only its total width, its double-width cells and its multi-character graphemes, so mixed-script output parses about 13% faster.
+- Escape sequences and control characters that follow one another are parsed in one pass instead of returning to the text scanner after each one.
+- Text made only of ASCII skips UTF-8 validation.
+
 ## 0.1.9 - Faster colors
 
 - A color or style sequence of the common shapes (one code, a 256-color or a 24-bit color) parses straight into its rendition, so colored output parses faster.
+
 ## 0.1.8 - Faster scrolling past a full scrollback
 
 - A row recycled from the top of a full scrollback keeps its buffers, so plain output that keeps scrolling parses about 20% faster.

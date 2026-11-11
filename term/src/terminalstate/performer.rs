@@ -27,15 +27,16 @@ use wezterm_escape_parser::osc::{
 use wezterm_escape_parser::{
     Action, ControlCode, DeviceControlMode, Esc, EscCode, OperatingSystemCommand, CSI,
 };
+use wezterm_surface::line::CellRun;
 
 /// A helper struct for implementing `vtparse::VTActor` while compartmentalizing
 /// the terminal state and the embedding/host terminal interface
 pub(crate) struct Performer<'a> {
     pub state: &'a mut TerminalState,
     print: String,
-    /// The byte length and cell width of each grapheme in the run being
-    /// placed, kept to spare an allocation per print.
-    run: Vec<(usize, usize)>,
+    /// The graphemes being placed together, kept to spare an allocation
+    /// per print.
+    run: CellRun,
 }
 
 impl<'a> Deref for Performer<'a> {
@@ -140,17 +141,21 @@ fn alone_widths(version: &UnicodeVersion) -> Option<&'static AloneWidths> {
 }
 
 // The character of `text` at byte `at`, a character boundary, and its length
-// in bytes. Away from the end the length comes from the lead byte without a
-// branch, as scripts of different lengths mix unpredictably.
+// in bytes. ASCII returns at once. Other characters take their length from
+// the lead byte without a branch, as scripts of different lengths mix
+// unpredictably.
 #[inline(always)]
 fn decode(text: &str, at: usize) -> Option<(u32, usize)> {
     let bytes = text.as_bytes();
-    let Some(four) = bytes.get(at..at + 4) else {
+    let Some(&four) = bytes.get(at..).and_then(<[u8]>::first_chunk::<4>) else {
         let c = text[at..].chars().next()?;
         return Some((c as u32, c.len_utf8()));
     };
-    let word = u32::from_be_bytes([four[0], four[1], four[2], four[3]]);
-    // The lead byte's leading ones: none for ASCII, else the length.
+    if four[0] < 0x80 {
+        return Some((u32::from(four[0]), 1));
+    }
+    let word = u32::from_be_bytes(four);
+    // The lead byte's leading ones give the length.
     let ones = (!word).leading_zeros();
     let len = ones.max(1);
     let lead = (word >> 24) & (0x7f >> ones);
@@ -202,7 +207,7 @@ impl<'a> Performer<'a> {
         Self {
             state,
             print: String::new(),
-            run: Vec::new(),
+            run: CellRun::default(),
         }
     }
 
@@ -449,7 +454,7 @@ impl<'a> Performer<'a> {
                         run_at = (self.cursor.x, self.cursor.y);
                         span = at..at;
                     }
-                    self.run.extend(std::iter::repeat_n((1, 1), n));
+                    self.run.push_narrow(n);
                     at += n;
                     span.end = at;
                     self.cursor.x += n;
@@ -554,7 +559,7 @@ impl<'a> Performer<'a> {
                     run_at = (self.cursor.x, self.cursor.y);
                     span = start..start;
                 }
-                self.run.push((g.len(), print_width));
+                self.run.push(g.len(), print_width, single.is_some());
                 span.end = at;
                 self.cursor.x += print_width;
                 continue;
@@ -617,30 +622,41 @@ impl<'a> Performer<'a> {
         widths: impl Fn(u32) -> u8,
     ) -> usize {
         let end = self.left_and_right_margins.end;
+        let x = self.cursor.x;
         let mut took = 0;
-        let Some((c, mut len)) = decode(text, *at) else {
+        let mut pos = *at;
+        let Some((c, mut len)) = decode(text, pos) else {
             return 0;
         };
         let mut width = widths(c);
+        let mut started = false;
         while width != 0 {
-            let Some((next, next_len)) = decode(text, *at + len) else {
+            let Some((next, next_len)) = decode(text, pos + len) else {
                 break;
             };
             let next_width = widths(next);
             // No character standing alone presents as an emoji.
-            if width == 3 || next_width == 0 || self.cursor.x + took + usize::from(width) >= end {
+            if width == 3 || next_width == 0 || x + took + usize::from(width) >= end {
                 break;
             }
-            if self.run.is_empty() || span.end != *at {
-                self.print_run(&text[span.clone()], *run_at, seqno);
-                *run_at = (self.cursor.x + took, self.cursor.y);
-                *span = *at..*at;
+            // The run continues the span placed so far only if nothing came
+            // between them; that holds for every character after the first.
+            if !started {
+                if self.run.is_empty() || span.end != pos {
+                    self.print_run(&text[span.clone()], *run_at, seqno);
+                    *run_at = (x, self.cursor.y);
+                    *span = pos..pos;
+                }
+                started = true;
             }
-            self.run.push((len, usize::from(width)));
-            *at += len;
-            span.end = *at;
+            self.run.push(len, usize::from(width), true);
+            pos += len;
             took += usize::from(width);
             (len, width) = (next_len, next_width);
+        }
+        if started {
+            *at = pos;
+            span.end = pos;
         }
         took
     }

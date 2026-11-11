@@ -835,23 +835,26 @@ impl VTParser {
         }
     }
 
-    /// Parse a sequence of bytes.  The sequence need not be complete.
-    /// This may result in some number of calls to the methods on the
-    /// provided `actor`.
-    /// Parses `bytes` until the state machine is back in the ground state,
-    /// having taken at least one byte, so text that follows can be printed
-    /// without it. Answers how many bytes it took.
+    /// Parses `bytes` until the state machine is back in the ground state
+    /// with text next, having taken at least one byte, so the caller can
+    /// print that text without the parser. Sequences and controls that
+    /// follow one another are all taken in one call. Returns how many bytes
+    /// it took.
     pub fn parse_until_ground(&mut self, bytes: &[u8], actor: &mut dyn VTActor) -> usize {
         let mut i = 0;
         while i < bytes.len() {
             if self.state == State::Ground && bytes[i] == 0x1b {
                 if let Some(taken) = self.csi_sequence(&bytes[i..], actor) {
-                    return i + taken;
+                    i += taken;
+                    if bytes.get(i).is_some_and(|&b| starts_control(b)) {
+                        continue;
+                    }
+                    return i;
                 }
             }
             self.parse_byte(bytes[i], actor);
             i += 1;
-            if self.state == State::Ground {
+            if self.state == State::Ground && !bytes.get(i).is_some_and(|&b| starts_control(b)) {
                 return i;
             }
         }
@@ -871,6 +874,12 @@ impl VTParser {
             i += 1;
         }
     }
+}
+
+// Whether `b` begins a control or a sequence rather than text: a C0
+// control (ESC among them) or DEL.
+fn starts_control(b: u8) -> bool {
+    b < 0x20 || b == 0x7f
 }
 
 #[cfg(test)]

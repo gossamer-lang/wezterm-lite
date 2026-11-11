@@ -1,4 +1,5 @@
 mod cellref;
+mod cellrun;
 mod clusterline;
 mod cold;
 // line::line holds the Line type itself, as in upstream wezterm.
@@ -10,5 +11,6 @@ mod test;
 mod vecstorage;
 
 pub use cellref::CellRef;
+pub use cellrun::CellRun;
 pub use cold::inflations as cold_inflations;
 pub use line::{DoubleClickRange, Line};

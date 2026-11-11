@@ -6,6 +6,7 @@ use crate::keys::KeyboardEncoding;
 use log::debug;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use wezterm_surface::line::CellRun;
 use wezterm_surface::SequenceNo;
 
 // History rows this near the screen stay uncompressed, as programs and
@@ -446,14 +447,14 @@ impl Screen {
         line.set_cell_grapheme(x, text, width, attr, seqno);
     }
 
-    /// Sets the cells from (`x`, `y`) on to the graphemes of `run`, each with
-    /// its cell width.
+    /// Sets the cells from (`x`, `y`) on to the graphemes `run` describes,
+    /// which cover `text`.
     pub fn set_cells_graphemes(
         &mut self,
         x: usize,
         y: VisibleRowIndex,
         text: &str,
-        run: &[(usize, usize)],
+        run: &CellRun,
         attr: CellAttributes,
         seqno: SequenceNo,
     ) {

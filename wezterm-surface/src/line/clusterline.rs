@@ -1,4 +1,4 @@
-use crate::line::CellRef;
+use crate::line::{CellRef, CellRun};
 use core::convert::TryInto;
 use core::num::NonZeroU8;
 use finl_unicode::grapheme_clusters::Graphemes;
@@ -387,12 +387,10 @@ impl ClusteredLine {
         self.len += cell_width as u32;
     }
 
-    /// Appends the graphemes of `run`, each with its cell width, all in
-    /// `attrs`: what `append_grapheme` does for each, as one extension.
-    /// Appends the graphemes of `text`, whose byte lengths and widths `run`
-    /// gives in order, all in `attrs`.
-    pub fn append_graphemes(&mut self, text: &str, run: &[(usize, usize)], attrs: CellAttributes) {
-        let total: usize = run.iter().map(|(_, w)| w).sum();
+    /// Appends the graphemes `run` describes, which cover `text`, all in
+    /// `attrs`.
+    pub fn append_graphemes(&mut self, text: &str, run: &CellRun, attrs: CellAttributes) {
+        let total = run.width();
         let extends = self.clusters.last().is_some_and(|cluster| {
             cluster.attrs == attrs
                 && usize::from(cluster.cell_width) + total <= usize::from(u16::MAX)
@@ -407,32 +405,27 @@ impl ClusteredLine {
                 cell_width: total as u16,
             });
         } else {
-            let mut rest = text;
-            for &(len, w) in run {
-                let (g, after) = rest.split_at(len);
-                rest = after;
+            for (g, w) in run.graphemes(text) {
                 self.append_grapheme(g, w, attrs.clone());
             }
             return;
         }
         self.text.push_str(text);
         let first = self.len as usize;
-        if run.iter().any(|&(_, w)| w > 1) {
-            let end = first + total;
+        if let Some(&(column, width)) = run.wide().last() {
+            let end = first + column + width;
             let bitset = self
                 .is_double_wide
                 .get_or_insert_with(|| Box::new(FixedBitSet::with_capacity(end)));
             bitset.grow(end);
-            let mut index = first;
-            for &(_, w) in run {
-                if w > 1 {
-                    bitset.set(index, true);
+            for &(column, width) in run.wide() {
+                if width > 1 {
+                    bitset.set(first + column, true);
                 }
-                index += w;
             }
         }
-        if let Some((_, w)) = run.last() {
-            self.last_cell_width = NonZeroU8::new(*w as u8);
+        if !run.is_empty() {
+            self.last_cell_width = NonZeroU8::new(run.last_width() as u8);
         }
         self.len += total as u32;
     }
